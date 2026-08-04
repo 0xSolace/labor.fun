@@ -1079,8 +1079,13 @@ async function startMessageLoop(): Promise<void> {
             const allowlistCfg = loadSenderAllowlist();
             const hasTrigger = groupMessages.some(
               (m) =>
-                triggerPattern.test(m.content.trim()) &&
-                (m.is_from_me ||
+                // Explicit trigger (@mention or trigger pattern)
+                (triggerPattern.test(m.content.trim()) &&
+                  (m.is_from_me ||
+                    isTriggerAllowed(chatJid, m.sender, allowlistCfg))) ||
+                // Implicit trigger: replying to the bot's own message
+                (m.is_reply_to_bot &&
+                  !m.is_from_me &&
                   isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
             );
             if (!hasTrigger) continue;
