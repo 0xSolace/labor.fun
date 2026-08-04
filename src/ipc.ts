@@ -1436,6 +1436,35 @@ export function handleModifyGroupClaudeMd(
  * files, sub-ms with gray-matter). No caching — the periodic members
  * sync rewrites files in place and we want a fresh view each call.
  */
+function loadTelegramCandidates(): PersonCandidate[] {
+  const dir = path.join(GROUPS_DIR, SHARED_KB_GROUP, 'context', 'people');
+  if (!fs.existsSync(dir)) return [];
+  const out: PersonCandidate[] = [];
+  for (const f of fs.readdirSync(dir)) {
+    if (!f.endsWith('.md') || f.startsWith('.')) continue;
+    try {
+      const fm = matter(fs.readFileSync(path.join(dir, f), 'utf-8'))
+        .data as Record<string, unknown>;
+      const id = fm.telegram_id != null ? String(fm.telegram_id) : null;
+      if (!id) continue;
+      out.push({
+        slug: f.replace(/\.md$/, ''),
+        discordId: id, // resolver field name; holds the telegram user id here
+        title: typeof fm.title === 'string' ? fm.title : '',
+        discordUsername:
+          typeof fm.telegram_username === 'string' ? fm.telegram_username : '',
+        discordDisplayName:
+          typeof fm.telegram_display_name === 'string'
+            ? fm.telegram_display_name
+            : '',
+      });
+    } catch {
+      // skip unparseable
+    }
+  }
+  return out;
+}
+
 function loadDiscordCandidates(): PersonCandidate[] {
   const dir = path.join(GROUPS_DIR, SHARED_KB_GROUP, 'context', 'people');
   if (!fs.existsSync(dir)) return [];
@@ -1607,6 +1636,42 @@ export async function processTaskIpc(
           '`dm_user` rejected: both `target` and `text` are required.',
         );
         break;
+      }
+      // Telegram-first: resolve against KB people with telegram_id and DM
+      // through the telegram channel (tg:<userid> private chat).
+      {
+        const tgRes = resolveDmTarget(target, loadTelegramCandidates());
+        if (!('error' in tgRes)) {
+          const person = tgRes.person;
+          try {
+            const ok = await deps.sendMessage(`tg:${person.discordId}`, text);
+            if (ok === false) {
+              await notify(
+                `couldn't DM ${person.title || person.slug}: telegram rejected the send. they need to open a private chat with @SalemConventBot once (bots can't message first).`,
+              );
+              break;
+            }
+            logger.info(
+              {
+                sourceGroup,
+                target,
+                resolved: person.slug,
+                length: text.length,
+              },
+              'dm_user: sent via telegram',
+            );
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            await notify(
+              `couldn't DM ${person.title || person.slug}: ${msg}. they may need to open a private chat with the bot first`,
+            );
+            logger.warn(
+              { target, resolved: person.slug, err: msg },
+              'dm_user: telegram send failed',
+            );
+          }
+          break;
+        }
       }
       if (!deps.dmDiscordUser) {
         await notify(

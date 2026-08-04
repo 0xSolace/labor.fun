@@ -22,6 +22,7 @@ import {
 import { registerChannel, ChannelOpts } from './registry.js';
 import { verifyIngressSignature } from './slack-http-receiver.js';
 import { ensureTelegramSenderAllowlisted } from './telegram-allowlist.js';
+import { resolveUser } from '../permissions.js';
 import {
   autoAllowlistMatches,
   buildJoinGreeting,
@@ -329,6 +330,29 @@ export class TelegramChannel implements Channel {
     if (existing) return existing;
     if (!this.opts.autoRegisterGroups || !this.opts.registerGroup) {
       return undefined;
+    }
+    if (chat.type === 'private') {
+      // DM lane: only known residents (user_identities) get a private,
+      // siloed folder. Strangers DMing the bot are ignored entirely.
+      const kb = resolveUser(String(chat.id), 'telegram');
+      if (!kb) return undefined;
+      const dmFolder =
+        `telegram_dm_${kb.replace(/[^a-z0-9_-]/gi, '')}`.toLowerCase();
+      this.opts.registerGroup(chatJid, {
+        name: `DM: ${kb}`,
+        folder: dmFolder,
+        trigger: `@${ASSISTANT_NAME}`,
+        requiresTrigger: false,
+        added_at: new Date().toISOString(),
+      });
+      const reg = this.opts.registeredGroups()[chatJid];
+      if (reg) {
+        logger.info(
+          { chatJid, kb, folder: reg.folder },
+          'Telegram DM lane auto-registered',
+        );
+      }
+      return reg;
     }
     if (chat.type !== 'group' && chat.type !== 'supergroup') return undefined;
 
