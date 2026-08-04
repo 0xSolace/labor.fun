@@ -12,6 +12,7 @@ import {
   getMeetingSummariesByGroup,
   getMeetingSummaryById,
   getMessagesSince,
+  getMessageThreadId,
   getMonthlyUsageRollup,
   getRecentMessages,
   getNewMessages,
@@ -53,6 +54,43 @@ function store(overrides: {
     is_from_me: overrides.is_from_me ?? false,
   });
 }
+
+// --- getMessageThreadId ---
+
+describe('getMessageThreadId', () => {
+  it('returns the stored thread_id for a message', () => {
+    storeChatMetadata('tg:-100123', '2026-08-04T00:00:00.000Z');
+    storeMessage({
+      id: '189',
+      chat_jid: 'tg:-100123',
+      sender: '42',
+      sender_name: 'Ron',
+      content: 'please add a chore',
+      timestamp: '2026-08-04T18:31:12.000Z',
+      is_from_me: false,
+      thread_id: '15',
+    });
+    expect(getMessageThreadId('tg:-100123', '189')).toBe('15');
+  });
+
+  it('returns undefined for messages without a thread_id', () => {
+    storeChatMetadata('tg:-100123', '2026-08-04T00:00:00.000Z');
+    storeMessage({
+      id: '190',
+      chat_jid: 'tg:-100123',
+      sender: '42',
+      sender_name: 'Ron',
+      content: 'general chat',
+      timestamp: '2026-08-04T18:31:13.000Z',
+      is_from_me: false,
+    });
+    expect(getMessageThreadId('tg:-100123', '190')).toBeUndefined();
+  });
+
+  it('returns undefined for unknown messages', () => {
+    expect(getMessageThreadId('tg:-100123', 'nope')).toBeUndefined();
+  });
+});
 
 // --- storeMessage (NewMessage format) ---
 

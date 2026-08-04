@@ -11,7 +11,12 @@ import {
   TELEGRAM_AUTO_REGISTER_GROUPS,
   TRIGGER_PATTERN,
 } from '../config.js';
-import { applyMessageEdit, logReaction, storeOutboundMessage } from '../db.js';
+import {
+  applyMessageEdit,
+  getMessageThreadId,
+  logReaction,
+  storeOutboundMessage,
+} from '../db.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
@@ -1350,6 +1355,22 @@ export class TelegramChannel implements Channel {
     }
   }
 
+  /**
+   * Durable thread-id fallback: read the triggering message's persisted
+   * thread_id from the messages table. Best-effort — an uninitialized test
+   * db or missing row simply yields undefined (→ General topic).
+   */
+  private lookupStoredThreadId(
+    jid: string,
+    messageId: string,
+  ): string | undefined {
+    try {
+      return getMessageThreadId(jid, messageId);
+    } catch {
+      return undefined;
+    }
+  }
+
   async sendMessage(
     jid: string,
     text: string,
@@ -1365,9 +1386,13 @@ export class TelegramChannel implements Channel {
       const numericId = jid.replace(/^tg:/, '');
       // Pin the reply to the forum topic of the message that triggered it
       // (concurrency-safe); proactive sends with no replyToMessageId go to the
-      // chat's general area.
+      // chat's general area. The in-memory map is the fast path; the stored
+      // message's thread_id column is the durable fallback (map is lost on
+      // restart, and LRU-capped — without the fallback, replies after a
+      // restart landed in the General topic instead of the question's topic).
       const threadId = opts?.replyToMessageId
-        ? this.threadIdById.get(`${jid}:${opts.replyToMessageId}`)
+        ? (this.threadIdById.get(`${jid}:${opts.replyToMessageId}`) ??
+          this.lookupStoredThreadId(jid, opts.replyToMessageId))
         : undefined;
       const options: Omit<TelegramSendOptions, 'parse_mode'> = threadId
         ? { message_thread_id: parseInt(threadId, 10) }
