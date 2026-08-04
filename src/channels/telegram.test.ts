@@ -40,6 +40,22 @@ vi.mock('../group-folder.js', () => ({
   ),
 }));
 
+// Mock db (message edit application + outbound stores)
+const applyMessageEditMock = vi.hoisted(() => vi.fn().mockReturnValue(true));
+vi.mock('../db.js', () => ({
+  logReaction: vi.fn(),
+  storeOutboundMessage: vi.fn(),
+  applyMessageEdit: applyMessageEditMock,
+}));
+
+// Mock permissions (resolveUser hits the real DB, which is uninitialized in
+// unit tests — the DM-lane path calls it for private chats). Unknown sender
+// by default: DM auto-registration stays off unless a test overrides this.
+const resolveUserMock = vi.hoisted(() => vi.fn(() => null));
+vi.mock('../permissions.js', () => ({
+  resolveUser: resolveUserMock,
+}));
+
 // --- Grammy mock ---
 
 type Handler = (...args: any[]) => any;
@@ -1083,6 +1099,309 @@ describe('TelegramChannel', () => {
       await channel.sendMessage('tg:100200300', 'No bot');
 
       // No error, no API call
+    });
+
+    it('reply-anchors to the triggering message (allow_sending_without_reply)', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerTextMessage(
+        createTextCtx({ text: 'question', messageId: 77 }),
+      );
+      await channel.sendMessage('tg:100200300', 'answer', {
+        replyToMessageId: '77',
+      });
+
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        'answer',
+        {
+          parse_mode: 'HTML',
+          reply_parameters: {
+            message_id: 77,
+            allow_sending_without_reply: true,
+          },
+        },
+      );
+    });
+
+    it('anchors only the FIRST chunk of a long reply', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerTextMessage(
+        createTextCtx({ text: 'question', messageId: 78 }),
+      );
+      await channel.sendMessage('tg:100200300', 'z'.repeat(5000), {
+        replyToMessageId: '78',
+      });
+
+      const calls = currentBot().api.sendMessage.mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[0][2].reply_parameters).toEqual({
+        message_id: 78,
+        allow_sending_without_reply: true,
+      });
+      expect(calls[1][2].reply_parameters).toBeUndefined();
+    });
+
+    it('keeps topic routing AND reply anchor together', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({ text: 'in topic', messageId: 90 });
+      (ctx.message as any).message_thread_id = 15;
+      await triggerTextMessage(ctx);
+      await channel.sendMessage('tg:100200300', 'topic answer', {
+        replyToMessageId: '90',
+      });
+
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        'topic answer',
+        {
+          parse_mode: 'HTML',
+          message_thread_id: 15,
+          reply_parameters: {
+            message_id: 90,
+            allow_sending_without_reply: true,
+          },
+        },
+      );
+    });
+
+    it('no anchor for proactive sends (no replyToMessageId)', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.sendMessage('tg:100200300', 'proactive');
+
+      const [, , options] = currentBot().api.sendMessage.mock.calls[0];
+      expect(options.reply_parameters).toBeUndefined();
+    });
+  });
+
+  // --- message edits ---
+
+  describe('edited messages', () => {
+    async function triggerEdit(ctx: any) {
+      const handlers =
+        currentBot().filterHandlers.get('edited_message:text') || [];
+      for (const h of handlers) await h(ctx);
+    }
+
+    it('applies a text edit to the stored message', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerEdit({
+        chat: { id: 100200300, type: 'group' },
+        editedMessage: { message_id: 42, text: 'corrected text' },
+      });
+
+      expect(applyMessageEditMock).toHaveBeenCalledWith(
+        'tg:100200300',
+        '42',
+        'corrected text',
+      );
+    });
+
+    it('ignores edits in unregistered chats', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerEdit({
+        chat: { id: 555555, type: 'group' },
+        editedMessage: { message_id: 1, text: 'edit' },
+      });
+
+      expect(applyMessageEditMock).not.toHaveBeenCalled();
+    });
+
+    it('does not deliver the edit as a new message', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerEdit({
+        chat: { id: 100200300, type: 'group' },
+        editedMessage: { message_id: 42, text: 'corrected' },
+      });
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- media thread/reply parity ---
+
+  describe('media thread and reply metadata', () => {
+    it('delivers thread_id for media sent in a forum topic', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        extra: { sticker: { emoji: '👍' } },
+      });
+      (ctx.message as any).message_thread_id = 15;
+      await triggerMediaMessage('message:sticker', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({ thread_id: '15' }),
+      );
+    });
+
+    it('routes the reply to media back into its topic', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        messageId: 61,
+        extra: { location: { latitude: 1, longitude: 2 } },
+      });
+      (ctx.message as any).message_thread_id = 16;
+      await triggerMediaMessage('message:location', ctx);
+
+      await channel.sendMessage('tg:100200300', 'got it', {
+        replyToMessageId: '61',
+      });
+
+      const [, , options] = currentBot().api.sendMessage.mock.calls[0];
+      expect(options.message_thread_id).toBe(16);
+    });
+
+    it('marks media replying to the bot as is_reply_to_bot', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        extra: { sticker: { emoji: '👍' } },
+      });
+      (ctx.message as any).reply_to_message = {
+        message_id: 9,
+        text: 'bot said this',
+        from: { id: 12345, first_name: 'Breadbrich Engels' },
+      };
+      (ctx as any).me = { username: 'andy_ai_bot', id: 12345 };
+      await triggerMediaMessage('message:sticker', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          is_reply_to_bot: true,
+          reply_to_message_id: '9',
+          reply_to_message_content: 'bot said this',
+        }),
+      );
+    });
+  });
+
+  // --- previously-dropped update kinds ---
+
+  describe('video notes, animations, polls', () => {
+    it('delivers a [Video note] placeholder (with download)', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        extra: { video_note: { file_id: 'vn1' } },
+      });
+      await triggerMediaMessage('message:video_note', ctx);
+      await flushPromises();
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content: expect.stringContaining('[Video note]'),
+        }),
+      );
+    });
+
+    it('delivers a [GIF] placeholder for animations', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        extra: { animation: { file_id: 'an1', file_name: 'fun.gif' } },
+      });
+      await triggerMediaMessage('message:animation', ctx);
+      await flushPromises();
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content: expect.stringContaining('[GIF]'),
+        }),
+      );
+    });
+
+    it('delivers native polls as question + options text', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        extra: {
+          poll: {
+            question: 'Pizza night?',
+            options: [{ text: 'yes' }, { text: 'no' }],
+          },
+        },
+      });
+      await triggerMediaMessage('message:poll', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content: '[Poll: Pizza night? — yes / no]',
+        }),
+      );
+    });
+  });
+
+  // --- command topic-awareness ---
+
+  describe('commands in forum topics', () => {
+    it('/chatid answers in the topic it was asked in', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const handler = currentBot().commandHandlers.get('chatid');
+      const ctx = createTextCtx({ text: '/chatid' });
+      (ctx.message as any).message_thread_id = 19;
+      await handler(ctx);
+
+      expect(ctx.reply).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ message_thread_id: 19 }),
+      );
+    });
+
+    it('/ping answers in the topic it was asked in', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const handler = currentBot().commandHandlers.get('ping');
+      const ctx = createTextCtx({ text: '/ping' });
+      (ctx.message as any).message_thread_id = 19;
+      await handler(ctx);
+
+      expect(ctx.reply).toHaveBeenCalledWith('Breadbrich Engels is online.', {
+        message_thread_id: 19,
+      });
     });
   });
 

@@ -32,9 +32,11 @@ vi.mock('../group-folder.js', () => ({
   ),
 }));
 
+const applyMessageEditMock = vi.hoisted(() => vi.fn().mockReturnValue(true));
 vi.mock('../db.js', () => ({
   logReaction: vi.fn(),
   storeOutboundMessage: vi.fn(),
+  applyMessageEdit: applyMessageEditMock,
 }));
 
 // env reader — the factory reads TELEGRAM_* keys through it.
@@ -366,6 +368,63 @@ describe('Telegram ingress mode', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
         expect.objectContaining({ content: '[Photo] look' }),
+      );
+    });
+
+    it('applies edited_message text edits to the store', async () => {
+      const opts = createOpts();
+      const { channel, port } = await startIngress(opts);
+      channels.push(channel);
+
+      const raw = JSON.stringify({
+        update_id: 9,
+        edited_message: {
+          message_id: 4,
+          date: Math.floor(Date.now() / 1000),
+          edit_date: Math.floor(Date.now() / 1000),
+          chat: { id: 100200300, type: 'group', title: 'Test Group' },
+          from: { id: 99001, first_name: 'Alice' },
+          text: 'fixed typo',
+        },
+      });
+      await post(port, '/telegram/updates', raw, signIngress(raw));
+
+      await vi.waitFor(() =>
+        expect(applyMessageEditMock).toHaveBeenCalledWith(
+          'tg:100200300',
+          '4',
+          'fixed typo',
+        ),
+      );
+      // Edits are never delivered as new messages.
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('media in a forum topic carries thread_id', async () => {
+      const opts = createOpts();
+      const { channel, port } = await startIngress(opts);
+      channels.push(channel);
+
+      const raw = JSON.stringify({
+        update_id: 3,
+        message: {
+          message_id: 8,
+          date: Math.floor(Date.now() / 1000),
+          message_thread_id: 15,
+          chat: { id: 100200300, type: 'supergroup', title: 'Test Group' },
+          from: { id: 99001, first_name: 'Alice' },
+          voice: { file_id: 'v1' },
+        },
+      });
+      await post(port, '/telegram/updates', raw, signIngress(raw));
+
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content: '[Voice message]',
+          thread_id: '15',
+        }),
       );
     });
 

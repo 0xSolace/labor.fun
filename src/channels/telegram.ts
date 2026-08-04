@@ -11,7 +11,7 @@ import {
   TELEGRAM_AUTO_REGISTER_GROUPS,
   TRIGGER_PATTERN,
 } from '../config.js';
-import { logReaction, storeOutboundMessage } from '../db.js';
+import { applyMessageEdit, logReaction, storeOutboundMessage } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
@@ -71,11 +71,26 @@ const EMOJI_MAP: Record<string, string> = {
  * The signatures mirror the exact call shapes telegram.ts already makes on
  * grammy's api, so the polling path is unchanged.
  */
+/**
+ * Options accepted by the send helpers. `reply_parameters` anchors the sent
+ * message as a Telegram reply to a specific inbound message;
+ * `allow_sending_without_reply` keeps the send alive when that message was
+ * deleted in the meantime (Telegram would otherwise reject the whole send).
+ */
+interface TelegramSendOptions {
+  message_thread_id?: number;
+  parse_mode?: 'HTML';
+  reply_parameters?: {
+    message_id: number;
+    allow_sending_without_reply?: boolean;
+  };
+}
+
 interface TelegramApiLike {
   sendMessage(
     chatId: string | number,
     text: string,
-    options?: { message_thread_id?: number; parse_mode?: 'HTML' },
+    options?: TelegramSendOptions,
   ): Promise<{ message_id: number }>;
   sendChatAction(chatId: string | number, action: 'typing'): Promise<unknown>;
   editMessageText(
@@ -105,7 +120,7 @@ async function sendTelegramHtmlChunk(
   api: Pick<TelegramApiLike, 'sendMessage'>,
   chatId: string | number,
   htmlChunk: string,
-  options: { message_thread_id?: number } = {},
+  options: Omit<TelegramSendOptions, 'parse_mode'> = {},
 ): Promise<number> {
   try {
     const msg = await api.sendMessage(chatId, htmlChunk, {
@@ -133,7 +148,7 @@ async function sendTelegramMessage(
   api: Pick<TelegramApiLike, 'sendMessage'>,
   chatId: string | number,
   text: string,
-  options: { message_thread_id?: number } = {},
+  options: Omit<TelegramSendOptions, 'parse_mode'> = {},
 ): Promise<number> {
   return sendTelegramHtmlChunk(
     api,
@@ -168,13 +183,16 @@ class ProxyTelegramApi implements TelegramApiLike {
   async sendMessage(
     chatId: string | number,
     text: string,
-    options: { message_thread_id?: number; parse_mode?: 'HTML' } = {},
+    options: TelegramSendOptions = {},
   ): Promise<{ message_id: number }> {
     const params: Record<string, unknown> = { chat_id: chatId, text };
     if (options.message_thread_id !== undefined) {
       params.message_thread_id = options.message_thread_id;
     }
     if (options.parse_mode) params.parse_mode = options.parse_mode;
+    if (options.reply_parameters) {
+      params.reply_parameters = options.reply_parameters;
+    }
     const r = await this.sender.call<{ message_id: number }>(
       'sendMessage',
       params,
@@ -672,8 +690,12 @@ export class TelegramChannel implements Channel {
     placeholder: string;
     fileId?: string;
     filename?: string;
+    threadId?: number;
+    replyTo?: InboundReplyTo;
+    meId?: number;
   }): void {
-    const { chat, from, messageId, date, placeholder } = params;
+    const { chat, from, messageId, date, placeholder, threadId, replyTo } =
+      params;
     const chatJid = `tg:${chat.id}`;
     // Same self-heal registration as the text handler (no-op unless
     // TELEGRAM_AUTO_REGISTER_GROUPS is on).
@@ -687,6 +709,36 @@ export class TelegramChannel implements Channel {
       from?.first_name || from?.username || from?.id?.toString() || 'Unknown';
     const caption = params.caption ? ` ${params.caption}` : '';
 
+    // Record the forum topic of this message so the agent's reply routes back
+    // into it — previously only the TEXT handler did this, so a photo/voice/
+    // document sent in a topic got its reply dropped into General (#46 class).
+    const msgIdStr = messageId.toString();
+    if (threadId !== undefined) {
+      this.threadIdById.set(`${chatJid}:${msgIdStr}`, threadId.toString());
+      if (this.threadIdById.size > TelegramChannel.THREAD_ID_BY_ID_MAX) {
+        const oldestKey = this.threadIdById.keys().next().value;
+        if (oldestKey !== undefined) this.threadIdById.delete(oldestKey);
+      }
+    }
+
+    // Reply metadata parity with the text handler: replying to the bot with
+    // media (e.g. answering Salem with a photo) must carry is_reply_to_bot so
+    // the implicit-trigger gate wakes the agent in requiresTrigger groups.
+    const replyToMessageId = replyTo?.message_id?.toString();
+    const replyToContent = replyTo?.text || replyTo?.caption;
+    const replyToSenderName = replyTo
+      ? replyTo.from?.first_name ||
+        replyTo.from?.username ||
+        replyTo.from?.id?.toString() ||
+        'Unknown'
+      : undefined;
+    const meIdResolved = this.botId(params.meId);
+    const isReplyToBot = !!(
+      replyTo &&
+      meIdResolved &&
+      replyTo.from?.id === meIdResolved
+    );
+
     const isGroup = chat.type === 'group' || chat.type === 'supergroup';
     this.opts.onChatMetadata(
       chatJid,
@@ -698,13 +750,18 @@ export class TelegramChannel implements Channel {
 
     const deliver = (content: string) => {
       this.opts.onMessage(chatJid, {
-        id: messageId.toString(),
+        id: msgIdStr,
         chat_jid: chatJid,
         sender: from?.id?.toString() || '',
         sender_name: senderName,
         content,
         timestamp,
         is_from_me: false,
+        thread_id: threadId !== undefined ? threadId.toString() : undefined,
+        reply_to_message_id: replyToMessageId,
+        reply_to_message_content: replyToContent,
+        reply_to_sender_name: replyToSenderName,
+        is_reply_to_bot: isReplyToBot,
       });
     };
 
@@ -727,6 +784,41 @@ export class TelegramChannel implements Channel {
     }
 
     deliver(`${placeholder}${caption}`);
+  }
+
+  /**
+   * Core edited_message handling (both transports): update the stored
+   * message content in place. Only text edits; edits in unregistered chats
+   * or of never-stored messages are ignored. The row keeps its original
+   * timestamp, so the group cursor does NOT treat the edit as new traffic —
+   * the agent simply sees the corrected text on its next run.
+   */
+  private handleEditedMessage(params: {
+    chatId: number;
+    messageId: number;
+    text: string | undefined;
+  }): void {
+    if (typeof params.text !== 'string') return;
+    const chatJid = `tg:${params.chatId}`;
+    if (!this.opts.registeredGroups()[chatJid]) return;
+    try {
+      const updated = applyMessageEdit(
+        chatJid,
+        params.messageId.toString(),
+        params.text,
+      );
+      if (updated) {
+        logger.info(
+          { chatJid, messageId: params.messageId },
+          'Telegram message edit applied',
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        { chatJid, messageId: params.messageId, err },
+        'Failed to apply Telegram message edit',
+      );
+    }
   }
 
   /**
@@ -823,8 +915,15 @@ export class TelegramChannel implements Channel {
     // Command to get chat ID (useful for registration). Thin adapter → shared
     // handleChatIdCommand.
     this.bot.command('chatid', (ctx) => {
+      // ctx.reply does NOT inherit the inbound topic — pass it explicitly so
+      // /chatid asked in a forum topic answers in that topic, not General
+      // (same inbound→outbound mirroring class as #46).
+      const threadId = ctx.message?.message_thread_id;
       void this.handleChatIdCommand(ctx.chat, ctx.from?.first_name, (text) => {
-        ctx.reply(markdownToTelegramHtml(text), { parse_mode: 'HTML' });
+        ctx.reply(markdownToTelegramHtml(text), {
+          parse_mode: 'HTML',
+          ...(threadId !== undefined ? { message_thread_id: threadId } : {}),
+        });
       });
     });
 
@@ -843,7 +942,14 @@ export class TelegramChannel implements Channel {
 
     // Command to check bot status
     this.bot.command('ping', (ctx) => {
-      ctx.reply(`${ASSISTANT_NAME} is online.`);
+      const threadId = ctx.message?.message_thread_id;
+      if (threadId !== undefined) {
+        ctx.reply(`${ASSISTANT_NAME} is online.`, {
+          message_thread_id: threadId,
+        });
+      } else {
+        ctx.reply(`${ASSISTANT_NAME} is online.`);
+      }
     });
 
     this.bot.on('message:text', async (ctx) => {
@@ -877,6 +983,9 @@ export class TelegramChannel implements Channel {
         placeholder,
         fileId: opts?.fileId,
         filename: opts?.filename,
+        threadId: ctx.message.message_thread_id,
+        replyTo: ctx.message.reply_to_message,
+        meId: ctx.me?.id,
       });
 
     this.bot.on('message:photo', (ctx) => {
@@ -921,6 +1030,47 @@ export class TelegramChannel implements Channel {
     });
     this.bot.on('message:location', (ctx) => media(ctx, '[Location]'));
     this.bot.on('message:contact', (ctx) => media(ctx, '[Contact]'));
+    // Round "video note" bubbles and GIFs previously matched NO filter and
+    // were dropped without a trace (not even a placeholder) — the sender
+    // thought Salem saw them. Same degrade path as the other media kinds.
+    this.bot.on('message:video_note', (ctx) => {
+      media(ctx, '[Video note]', {
+        fileId: ctx.message.video_note?.file_id,
+        filename: `video_note_${ctx.message.message_id}`,
+      });
+    });
+    this.bot.on('message:animation', (ctx) => {
+      media(ctx, '[GIF]', {
+        fileId: ctx.message.animation?.file_id,
+        filename:
+          ctx.message.animation?.file_name ||
+          `animation_${ctx.message.message_id}`,
+      });
+    });
+    // Native Telegram polls: deliver the question + options as text so the
+    // agent at least knows a poll happened (was: silent drop).
+    this.bot.on('message:poll', (ctx) => {
+      const poll = ctx.message.poll;
+      const options = (poll?.options || [])
+        .map((o: { text: string }) => o.text)
+        .join(' / ');
+      media(
+        ctx,
+        `[Poll: ${poll?.question || ''}${options ? ` — ${options}` : ''}]`,
+      );
+    });
+
+    // Message EDITS: Telegram sends edited_message updates; ignoring them let
+    // the agent keep acting on stale text (user fixes a typo in an address,
+    // Salem uses the old one). Update the stored row in place — the original
+    // timestamp is preserved so the cursor never re-triggers a run on an edit.
+    this.bot.on('edited_message:text', (ctx) => {
+      this.handleEditedMessage({
+        chatId: ctx.chat.id,
+        messageId: ctx.editedMessage.message_id,
+        text: ctx.editedMessage.text,
+      });
+    });
 
     // Handle errors gracefully
     this.bot.catch((err) => {
@@ -1034,6 +1184,20 @@ export class TelegramChannel implements Channel {
         return;
       }
 
+      // Message edits (ingress parity with the polling edited_message:text
+      // handler): update stored content in place, never re-trigger.
+      const edited = update.edited_message as any;
+      if (edited) {
+        if (edited.chat && typeof edited.text === 'string') {
+          this.handleEditedMessage({
+            chatId: edited.chat.id,
+            messageId: edited.message_id,
+            text: edited.text,
+          });
+        }
+        return;
+      }
+
       const message = update.message as any;
       if (!message) return;
       const chat = message.chat as InboundChat | undefined;
@@ -1047,15 +1211,21 @@ export class TelegramChannel implements Channel {
           const cmd = text.slice(1).split(/[\s@]/)[0].toLowerCase();
           if (cmd === 'chatid') {
             // /chatid can't ctx.reply without a token — send via the proxy.
+            // Mirror the inbound topic so the answer lands where it was asked.
             await this.handleChatIdCommand(
               chat,
               from?.first_name,
-              (replyText) => this.sendRawText(chat.id, replyText),
+              (replyText) =>
+                this.sendRawText(chat.id, replyText, message.message_thread_id),
             );
             return; // not stored (matches polling)
           }
           if (cmd === 'ping') {
-            await this.sendRawText(chat.id, `${ASSISTANT_NAME} is online.`);
+            await this.sendRawText(
+              chat.id,
+              `${ASSISTANT_NAME} is online.`,
+              message.message_thread_id,
+            );
             return; // not stored (matches polling)
           }
         }
@@ -1091,6 +1261,10 @@ export class TelegramChannel implements Channel {
           placeholder,
           fileId,
           filename,
+          threadId: message.message_thread_id,
+          replyTo: message.reply_to_message,
+          // No getMe in ingress; identity comes from the botId hint.
+          meId: undefined,
         });
 
       if (Array.isArray(message.photo)) {
@@ -1127,6 +1301,25 @@ export class TelegramChannel implements Channel {
         dispatchMedia('[Location]');
       } else if (message.contact) {
         dispatchMedia('[Contact]');
+      } else if (message.video_note) {
+        dispatchMedia(
+          '[Video note]',
+          message.video_note.file_id,
+          `video_note_${message.message_id}`,
+        );
+      } else if (message.animation) {
+        dispatchMedia(
+          '[GIF]',
+          message.animation.file_id,
+          message.animation.file_name || `animation_${message.message_id}`,
+        );
+      } else if (message.poll) {
+        const options = (message.poll.options || [])
+          .map((o: { text: string }) => o.text)
+          .join(' / ');
+        dispatchMedia(
+          `[Poll: ${message.poll.question || ''}${options ? ` — ${options}` : ''}]`,
+        );
       }
     } catch (err) {
       logger.error({ err }, 'Telegram ingress: failed to process update');
@@ -1138,11 +1331,20 @@ export class TelegramChannel implements Channel {
    * the ingress /chatid + /ping replies (which are NOT stored as messages).
    * Markdown→plain fallback applies via sendTelegramMessage.
    */
-  private async sendRawText(chatId: number, text: string): Promise<void> {
+  private async sendRawText(
+    chatId: number,
+    text: string,
+    threadId?: number,
+  ): Promise<void> {
     const api = this.api();
     if (!api) return;
     try {
-      await sendTelegramMessage(api, chatId, text);
+      await sendTelegramMessage(
+        api,
+        chatId,
+        text,
+        threadId !== undefined ? { message_thread_id: threadId } : {},
+      );
     } catch (err) {
       logger.warn({ chatId, err }, 'Telegram: failed to send command reply');
     }
@@ -1167,9 +1369,24 @@ export class TelegramChannel implements Channel {
       const threadId = opts?.replyToMessageId
         ? this.threadIdById.get(`${jid}:${opts.replyToMessageId}`)
         : undefined;
-      const options = threadId
+      const options: Omit<TelegramSendOptions, 'parse_mode'> = threadId
         ? { message_thread_id: parseInt(threadId, 10) }
         : {};
+      // Reply-anchor to the triggering message so readers in a busy group can
+      // tell WHICH message this answers (same inbound→outbound mirroring class
+      // as the topic fix above — the metadata arrived, use it on the way out).
+      // allow_sending_without_reply: a deleted trigger must never kill the
+      // send. Only the FIRST chunk anchors; continuation chunks would render
+      // as a stack of quoted replies otherwise.
+      const replyAnchorId = opts?.replyToMessageId
+        ? parseInt(opts.replyToMessageId, 10)
+        : NaN;
+      const replyAnchor = Number.isFinite(replyAnchorId)
+        ? {
+            message_id: replyAnchorId,
+            allow_sending_without_reply: true,
+          }
+        : undefined;
 
       // Markdown → Telegram HTML, then split within Telegram's 4096-char
       // limit (paragraph-boundary preferred, never mid-tag). Each chunk
@@ -1189,13 +1406,17 @@ export class TelegramChannel implements Channel {
           chunks.push(escapeHtml(plain.slice(i, i + MAX_LENGTH)));
         }
       }
+      let first = true;
       for (const chunk of chunks) {
         const msgId = await sendTelegramHtmlChunk(
           api,
           numericId,
           chunk,
-          options,
+          first && replyAnchor
+            ? { ...options, reply_parameters: replyAnchor }
+            : options,
         );
+        first = false;
         try {
           storeOutboundMessage(
             jid,
