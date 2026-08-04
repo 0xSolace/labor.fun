@@ -40,12 +40,16 @@ vi.mock('../group-folder.js', () => ({
   ),
 }));
 
-// Mock db (message edit application + outbound stores)
+// Mock db (message edit application + outbound stores + thread-id fallback)
 const applyMessageEditMock = vi.hoisted(() => vi.fn().mockReturnValue(true));
+const getMessageThreadIdMock = vi.hoisted(() =>
+  vi.fn((): string | undefined => undefined),
+);
 vi.mock('../db.js', () => ({
   logReaction: vi.fn(),
   storeOutboundMessage: vi.fn(),
   applyMessageEdit: applyMessageEditMock,
+  getMessageThreadId: getMessageThreadIdMock,
 }));
 
 // Mock permissions (resolveUser hits the real DB, which is uninitialized in
@@ -137,6 +141,7 @@ function createTextCtx(overrides: {
   date?: number;
   entities?: any[];
   reply_to_message?: any;
+  message_thread_id?: number;
 }) {
   const chatId = overrides.chatId ?? 100200300;
   const chatType = overrides.chatType ?? 'group';
@@ -157,6 +162,7 @@ function createTextCtx(overrides: {
       message_id: overrides.messageId ?? 1,
       entities: overrides.entities ?? [],
       reply_to_message: overrides.reply_to_message,
+      message_thread_id: overrides.message_thread_id,
     },
     me: { username: 'andy_ai_bot' },
     reply: vi.fn(),
@@ -1402,6 +1408,133 @@ describe('TelegramChannel', () => {
       expect(ctx.reply).toHaveBeenCalledWith('Breadbrich Engels is online.', {
         message_thread_id: 19,
       });
+    });
+  });
+
+  // --- Forum topic (message_thread_id) reply routing ---
+
+  describe('forum topic reply routing', () => {
+    it('stores inbound thread_id and routes the reply to that topic', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      // Inbound message in forum topic 15
+      await triggerTextMessage(
+        createTextCtx({
+          text: '@Breadbrich Engels please add a chore',
+          messageId: 189,
+          message_thread_id: 15,
+        }),
+      );
+
+      // Inbound carried thread_id through to the orchestrator
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({ id: '189', thread_id: '15' }),
+      );
+
+      // Reply anchored to that message lands in topic 15
+      await channel.sendMessage('tg:100200300', 'done', {
+        replyToMessageId: '189',
+      });
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        'done',
+        expect.objectContaining({ message_thread_id: 15, parse_mode: 'HTML' }),
+      );
+    });
+
+    it('replies without replyToMessageId go to the general area', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerTextMessage(
+        createTextCtx({
+          text: 'question in a topic',
+          messageId: 189,
+          message_thread_id: 15,
+        }),
+      );
+
+      await channel.sendMessage('tg:100200300', 'proactive send');
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        'proactive send',
+        { parse_mode: 'HTML' },
+      );
+    });
+
+    it('messages without a thread_id anchor to the general area', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerTextMessage(
+        createTextCtx({ text: 'plain group message', messageId: 42 }),
+      );
+
+      await channel.sendMessage('tg:100200300', 'reply', {
+        replyToMessageId: '42',
+      });
+      const call = currentBot().api.sendMessage.mock.calls.at(-1);
+      expect(call[0]).toBe('100200300');
+      expect(call[1]).toBe('reply');
+      expect(call[2].message_thread_id).toBeUndefined();
+      expect(call[2].parse_mode).toBe('HTML');
+    });
+
+    it('falls back to the stored thread_id when the in-memory map is cold (restart)', async () => {
+      // Simulate a restart: the in-memory map is empty, but the message's
+      // thread_id was persisted by storeMessage (real query covered in
+      // db.test.ts getMessageThreadId).
+      getMessageThreadIdMock.mockReturnValueOnce('15');
+
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      // No inbound processed on this instance — map is empty.
+      await channel.sendMessage('tg:100200300', 'done', {
+        replyToMessageId: '189',
+      });
+      expect(getMessageThreadIdMock).toHaveBeenCalledWith(
+        'tg:100200300',
+        '189',
+      );
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        'done',
+        expect.objectContaining({ message_thread_id: 15, parse_mode: 'HTML' }),
+      );
+    });
+
+    it('records thread_id for media messages too', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        messageId: 77,
+        extra: { sticker: { emoji: '👍' }, message_thread_id: 15 },
+      });
+      const handlers = currentBot().filterHandlers.get('message:sticker') || [];
+      for (const h of handlers) await h(ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({ id: '77', thread_id: '15' }),
+      );
+
+      await channel.sendMessage('tg:100200300', 'nice sticker', {
+        replyToMessageId: '77',
+      });
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        'nice sticker',
+        expect.objectContaining({ message_thread_id: 15, parse_mode: 'HTML' }),
+      );
     });
   });
 

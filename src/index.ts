@@ -94,6 +94,12 @@ import {
   insertApiUsage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
+import {
+  advanceRunAnchor,
+  beginRunAnchor,
+  clearRunAnchor,
+  currentRunAnchor,
+} from './run-trigger-anchor.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { startEmailPoller } from './email-poller.js';
 import { startSlackMembersSyncLoop } from './integrations/slack-members-sync.js';
@@ -560,6 +566,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return await processGroupMessagesInner(chatJid);
   } finally {
     clearInFlightRetentionFloor(chatJid);
+    // The run is over on every exit path — stop anchoring replies to it.
+    clearRunAnchor(chatJid);
   }
 }
 
@@ -765,6 +773,14 @@ async function processGroupMessagesInner(chatJid: string): Promise<boolean> {
     await channel.addReaction!(chatJid, triggerMessageId, 'thinking_face');
   }
 
+  // Track this run's triggering message so replies anchor to the LATEST
+  // message actually handed to the container. The pipe path in
+  // startMessageLoop advances this when it feeds new messages into the
+  // still-active container — without it, replies to piped messages anchored
+  // to the run's ORIGINAL trigger, which in Telegram forum groups posted
+  // answers to the General topic instead of the topic the question came from.
+  beginRunAnchor(chatJid, triggerMessageId);
+
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
@@ -776,14 +792,15 @@ async function processGroupMessagesInner(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
-        // Anchor the reply to the message that triggered this run so it lands
-        // in the right thread even if another message arrived (in a different
-        // thread/conversation) while the agent was working. Without this the
-        // channel resolves the target from a mutable "last inbound" slot that
-        // the concurrent message overwrites, posting the reply in the wrong
-        // place. See #46.
+        // Anchor the reply to the latest message handed to this run so it
+        // lands in the right thread/topic even if another message arrived
+        // (in a different thread/conversation) while the agent was working.
+        // Without this the channel resolves the target from a mutable "last
+        // inbound" slot that a concurrent message overwrites, posting the
+        // reply in the wrong place. See #46; run-trigger-anchor.ts for the
+        // piped-message case.
         await channel.sendMessage(chatJid, text, {
-          replyToMessageId: triggerMessageId,
+          replyToMessageId: currentRunAnchor(chatJid) ?? triggerMessageId,
         });
         outputSentToUser = true;
         outputLength += text.length;
@@ -1107,6 +1124,14 @@ async function startMessageLoop(): Promise<void> {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
+            );
+            // Re-anchor the active run's replies to the latest piped message
+            // so the answer lands in ITS thread/topic (Telegram forum topics,
+            // Slack threads), not the thread of the message that originally
+            // started the container.
+            advanceRunAnchor(
+              chatJid,
+              messagesToSend[messagesToSend.length - 1].id,
             );
             const pipedFrom = lastAgentTimestamp[chatJid] || '';
             lastAgentTimestamp[chatJid] =

@@ -1033,6 +1033,22 @@ export function getMessagesSince(
  * self-chats), returning the original content avoids the perpetual
  * "waiting for this message" state on the recipient side.
  */
+/**
+ * Look up the stored forum-topic/thread id of an inbound message. Durable
+ * fallback for the Telegram channel's in-memory threadIdById map (which is
+ * lost on restart): the thread_id column is persisted with every stored
+ * message, so topic routing survives process restarts.
+ */
+export function getMessageThreadId(
+  chatJid: string,
+  messageId: string,
+): string | undefined {
+  const row = db
+    .prepare(`SELECT thread_id FROM messages WHERE id = ? AND chat_jid = ?`)
+    .get(messageId, chatJid) as { thread_id: string | null } | undefined;
+  return row?.thread_id ?? undefined;
+}
+
 export function getMessageContentById(
   id: string,
   chatJid: string,
