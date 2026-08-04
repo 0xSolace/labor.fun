@@ -89,6 +89,8 @@ interface TelegramSendOptions {
     message_id: number;
     allow_sending_without_reply?: boolean;
   };
+  /** Inline keyboard etc. — used by plugin senders (e.g. governance buttons). */
+  reply_markup?: unknown;
 }
 
 interface TelegramApiLike {
@@ -197,6 +199,12 @@ class ProxyTelegramApi implements TelegramApiLike {
     if (options.parse_mode) params.parse_mode = options.parse_mode;
     if (options.reply_parameters) {
       params.reply_parameters = options.reply_parameters;
+    }
+    // Mirror reply_markup so plugin sends (inline keyboards) survive the
+    // proxy hop — without this, ingress-mode button posts silently lost
+    // their keyboards (same class as the threadId/reply_parameters gaps).
+    if (options.reply_markup !== undefined) {
+      params.reply_markup = options.reply_markup;
     }
     const r = await this.sender.call<{ message_id: number }>(
       'sendMessage',
