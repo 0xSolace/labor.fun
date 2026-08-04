@@ -414,14 +414,14 @@ describe('Telegram ingress mode', () => {
       expect(body.method).toBe('sendMessage');
       expect(body.params.chat_id).toBe('100200300');
       expect(body.params.text).toBe('Hello');
-      // Markdown attempted first.
-      expect(body.params.parse_mode).toBe('Markdown');
+      // HTML attempted first.
+      expect(body.params.parse_mode).toBe('HTML');
     });
 
-    it('falls back to plain text when the proxy returns ok:false for Markdown', async () => {
+    it('falls back to plain text when the proxy returns ok:false for HTML', async () => {
       process.env.CONTROL_PLANE_URL = 'https://cp.example';
       process.env.CONTROL_PLANE_TOKEN = 'cp-token';
-      // First call (Markdown) → ok:false; second (plain) → ok:true.
+      // First call (HTML) → ok:false; second (plain) → ok:true.
       (global.fetch as any)
         .mockResolvedValueOnce({
           ok: true,
@@ -446,6 +446,7 @@ describe('Telegram ingress mode', () => {
       const second = JSON.parse((global.fetch as any).mock.calls[1][1].body);
       expect(second.method).toBe('sendMessage');
       expect(second.params.parse_mode).toBeUndefined(); // plain retry
+      expect(second.params.text).toBe('Hello world'); // tags stripped
     });
 
     it('does not throw when the proxy rejects (network error)', async () => {

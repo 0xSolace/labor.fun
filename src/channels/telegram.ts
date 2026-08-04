@@ -24,6 +24,12 @@ import { verifyIngressSignature } from './slack-http-receiver.js';
 import { ensureTelegramSenderAllowlisted } from './telegram-allowlist.js';
 import { resolveUser } from '../permissions.js';
 import {
+  escapeHtml,
+  htmlToPlainText,
+  markdownToTelegramHtml,
+  splitTelegramHtmlChunks,
+} from './telegram-format.js';
+import {
   autoAllowlistMatches,
   buildJoinGreeting,
   deriveTelegramGroupFolder,
@@ -69,14 +75,14 @@ interface TelegramApiLike {
   sendMessage(
     chatId: string | number,
     text: string,
-    options?: { message_thread_id?: number; parse_mode?: 'Markdown' },
+    options?: { message_thread_id?: number; parse_mode?: 'HTML' },
   ): Promise<{ message_id: number }>;
   sendChatAction(chatId: string | number, action: 'typing'): Promise<unknown>;
   editMessageText(
     chatId: string | number,
     messageId: number,
     text: string,
-    options?: { parse_mode?: 'Markdown' },
+    options?: { parse_mode?: 'HTML' },
   ): Promise<unknown>;
   deleteMessage(chatId: string | number, messageId: number): Promise<unknown>;
   setMessageReaction(
@@ -87,14 +93,41 @@ interface TelegramApiLike {
 }
 
 /**
- * Send a message with Telegram Markdown parse mode, falling back to plain text.
- * Claude's output naturally matches Telegram's Markdown v1 format:
- *   *bold*, _italic_, `code`, ```code blocks```, [links](url)
+ * Send one pre-rendered Telegram HTML chunk, falling back to plain text
+ * (tags stripped, entities unescaped) if Telegram rejects the HTML.
  *
  * Works over any TelegramApiLike: grammy's api throws on failure (its catch
  * drives the plain-text retry), and the ingress adapter throws a synthetic
- * error on a Telegram `ok:false`, so the SAME Markdown→plain fallback applies
- * to both transports.
+ * error on a Telegram `ok:false`, so the SAME HTML→plain fallback applies
+ * to both transports. A message is never dropped because of formatting.
+ */
+async function sendTelegramHtmlChunk(
+  api: Pick<TelegramApiLike, 'sendMessage'>,
+  chatId: string | number,
+  htmlChunk: string,
+  options: { message_thread_id?: number } = {},
+): Promise<number> {
+  try {
+    const msg = await api.sendMessage(chatId, htmlChunk, {
+      ...options,
+      parse_mode: 'HTML',
+    });
+    return msg.message_id;
+  } catch (err) {
+    // Fallback: send as plain text if HTML parsing fails
+    logger.debug({ err }, 'HTML send failed, falling back to plain text');
+    const msg = await api.sendMessage(
+      chatId,
+      htmlToPlainText(htmlChunk),
+      options,
+    );
+    return msg.message_id;
+  }
+}
+
+/**
+ * Send a markdown message as Telegram rich text: markdown → Telegram HTML
+ * (parse_mode 'HTML'), plain-text fallback on parse rejection.
  */
 async function sendTelegramMessage(
   api: Pick<TelegramApiLike, 'sendMessage'>,
@@ -102,18 +135,12 @@ async function sendTelegramMessage(
   text: string,
   options: { message_thread_id?: number } = {},
 ): Promise<number> {
-  try {
-    const msg = await api.sendMessage(chatId, text, {
-      ...options,
-      parse_mode: 'Markdown',
-    });
-    return msg.message_id;
-  } catch (err) {
-    // Fallback: send as plain text if Markdown parsing fails
-    logger.debug({ err }, 'Markdown send failed, falling back to plain text');
-    const msg = await api.sendMessage(chatId, text, options);
-    return msg.message_id;
-  }
+  return sendTelegramHtmlChunk(
+    api,
+    chatId,
+    markdownToTelegramHtml(text),
+    options,
+  );
 }
 
 /**
@@ -122,7 +149,7 @@ async function sendTelegramMessage(
  * unchanged in ingress mode.
  *
  * Failure semantics: grammy throws on API errors; to preserve the exact
- * Markdown→plain fallback logic in sendTelegramMessage/updateStatus, this
+ * HTML→plain fallback logic in sendTelegramMessage/updateStatus, this
  * adapter THROWS when the proxy returns a Telegram `ok:false` (or the CP is
  * unreachable). The outer methods already try/catch, so a persistent failure
  * ends in a logged warning/error exactly as the polling path would.
@@ -141,7 +168,7 @@ class ProxyTelegramApi implements TelegramApiLike {
   async sendMessage(
     chatId: string | number,
     text: string,
-    options: { message_thread_id?: number; parse_mode?: 'Markdown' } = {},
+    options: { message_thread_id?: number; parse_mode?: 'HTML' } = {},
   ): Promise<{ message_id: number }> {
     const params: Record<string, unknown> = { chat_id: chatId, text };
     if (options.message_thread_id !== undefined) {
@@ -168,7 +195,7 @@ class ProxyTelegramApi implements TelegramApiLike {
     chatId: string | number,
     messageId: number,
     text: string,
-    options: { parse_mode?: 'Markdown' } = {},
+    options: { parse_mode?: 'HTML' } = {},
   ): Promise<unknown> {
     const params: Record<string, unknown> = {
       chat_id: chatId,
@@ -797,7 +824,7 @@ export class TelegramChannel implements Channel {
     // handleChatIdCommand.
     this.bot.command('chatid', (ctx) => {
       void this.handleChatIdCommand(ctx.chat, ctx.from?.first_name, (text) => {
-        ctx.reply(text, { parse_mode: 'Markdown' });
+        ctx.reply(markdownToTelegramHtml(text), { parse_mode: 'HTML' });
       });
     });
 
@@ -1144,32 +1171,40 @@ export class TelegramChannel implements Channel {
         ? { message_thread_id: parseInt(threadId, 10) }
         : {};
 
-      // Telegram has a 4096 character limit per message — split if needed
+      // Markdown → Telegram HTML, then split within Telegram's 4096-char
+      // limit (paragraph-boundary preferred, never mid-tag). Each chunk
+      // falls back to plain text independently if Telegram rejects the HTML.
       const MAX_LENGTH = 4096;
-      if (text.length <= MAX_LENGTH) {
-        const msgId = await sendTelegramMessage(api, numericId, text, options);
+      const html = markdownToTelegramHtml(text);
+      let chunks: string[];
+      try {
+        chunks = splitTelegramHtmlChunks(html, MAX_LENGTH);
+      } catch (err) {
+        // Pathological input (e.g. tag overhead > limit) — never drop the
+        // message; fall back to fixed-size plain-text chunks.
+        logger.warn({ err, jid }, 'HTML chunking failed, sending plain text');
+        const plain = htmlToPlainText(html);
+        chunks = [];
+        for (let i = 0; i < plain.length; i += MAX_LENGTH) {
+          chunks.push(escapeHtml(plain.slice(i, i + MAX_LENGTH)));
+        }
+      }
+      for (const chunk of chunks) {
+        const msgId = await sendTelegramHtmlChunk(
+          api,
+          numericId,
+          chunk,
+          options,
+        );
         try {
-          storeOutboundMessage(jid, msgId.toString(), text, ASSISTANT_NAME);
+          storeOutboundMessage(
+            jid,
+            msgId.toString(),
+            htmlToPlainText(chunk),
+            ASSISTANT_NAME,
+          );
         } catch (err) {
           logger.warn({ err, jid }, 'storeOutboundMessage failed (continuing)');
-        }
-      } else {
-        for (let i = 0; i < text.length; i += MAX_LENGTH) {
-          const chunk = text.slice(i, i + MAX_LENGTH);
-          const msgId = await sendTelegramMessage(
-            api,
-            numericId,
-            chunk,
-            options,
-          );
-          try {
-            storeOutboundMessage(jid, msgId.toString(), chunk, ASSISTANT_NAME);
-          } catch (err) {
-            logger.warn(
-              { err, jid },
-              'storeOutboundMessage failed (continuing)',
-            );
-          }
         }
       }
       logger.info(
@@ -1247,11 +1282,14 @@ export class TelegramChannel implements Channel {
     if (!api) return;
     try {
       const numericId = jid.replace(/^tg:/, '');
-      await api.editMessageText(numericId, parseInt(messageId, 10), text, {
-        parse_mode: 'Markdown',
-      });
+      await api.editMessageText(
+        numericId,
+        parseInt(messageId, 10),
+        markdownToTelegramHtml(text),
+        { parse_mode: 'HTML' },
+      );
     } catch {
-      // Fallback: try without Markdown if parsing fails
+      // Fallback: try without HTML if parsing fails
       try {
         const numericId = jid.replace(/^tg:/, '');
         await api.editMessageText(numericId, parseInt(messageId, 10), text);
