@@ -477,6 +477,28 @@ describe('Telegram ingress mode', () => {
       expect(body.params.parse_mode).toBe('HTML');
     });
 
+    it('forwards reply_markup through the proxy (plugin inline keyboards)', async () => {
+      process.env.CONTROL_PLANE_URL = 'https://cp.example';
+      process.env.CONTROL_PLANE_TOKEN = 'cp-token';
+      const opts = createOpts();
+      const { channel } = await startIngress(opts);
+      channels.push(channel);
+
+      const keyboard = {
+        inline_keyboard: [[{ text: 'verify', callback_data: 'vote:yay' }]],
+      };
+      // Plugin senders (tg-extended postWithButtons) call the api surface
+      // directly with reply_markup; the proxy must mirror it.
+      await (channel as any).proxyApi.sendMessage('100200300', 'Vote?', {
+        reply_markup: keyboard,
+        message_thread_id: 15,
+      });
+
+      const body = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      expect(body.params.reply_markup).toEqual(keyboard);
+      expect(body.params.message_thread_id).toBe(15);
+    });
+
     it('falls back to plain text when the proxy returns ok:false for HTML', async () => {
       process.env.CONTROL_PLANE_URL = 'https://cp.example';
       process.env.CONTROL_PLANE_TOKEN = 'cp-token';
