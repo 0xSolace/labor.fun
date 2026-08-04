@@ -780,8 +780,12 @@ export const GITHUB_APP_MODE = envVal('GITHUB_APP_MODE') === 'true';
 // Periodic loop that reviews the GitHub-synced + hand-authored task graph and
 // wakes the agent to re-estimate/re-plan and DM blockers/overdue owners.
 // Default weekly; 0 disables the loop entirely.
-const PM_ORCH_RAW = parseInt(envVal('PM_ORCHESTRATION_INTERVAL_MS') ?? '604800000', 10);
-export const PM_ORCHESTRATION_INTERVAL_MS = Number.isFinite(PM_ORCH_RAW) && PM_ORCH_RAW >= 0 ? PM_ORCH_RAW : 604800000;
+const PM_ORCH_RAW = parseInt(
+  envVal('PM_ORCHESTRATION_INTERVAL_MS') ?? '604800000',
+  10,
+);
+export const PM_ORCHESTRATION_INTERVAL_MS =
+  Number.isFinite(PM_ORCH_RAW) && PM_ORCH_RAW >= 0 ? PM_ORCH_RAW : 604800000;
 // Group whose chat receives the PM run / agent context. Empty → SHARED_KB_GROUP.
 export const PM_ORCHESTRATION_TARGET_GROUP =
   envVal('PM_ORCHESTRATION_TARGET_GROUP') || '';
