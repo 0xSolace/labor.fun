@@ -116,3 +116,5 @@ npm run typecheck    # Type-check only
 ## License
 
 MIT
+
+<!-- auto-deploy live 2026-08-04 -->
