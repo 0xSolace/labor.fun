@@ -811,6 +811,25 @@ export function storeOutboundMessage(
   ).run(messageId, chatJid, 'bot', botName, content, new Date().toISOString());
 }
 
+/**
+ * Apply a Telegram/Discord-style message EDIT: update the stored content of an
+ * existing message in place, preserving its original timestamp (so the
+ * per-group cursor never treats an edit as a new message and re-triggers a
+ * run). Returns true when a stored row was updated, false when the edited
+ * message was never stored (e.g. arrived before registration) — callers may
+ * then fall back to ignoring the edit.
+ */
+export function applyMessageEdit(
+  chatJid: string,
+  messageId: string,
+  newContent: string,
+): boolean {
+  const res = db
+    .prepare(`UPDATE messages SET content = ? WHERE chat_jid = ? AND id = ?`)
+    .run(newContent, chatJid, messageId);
+  return res.changes > 0;
+}
+
 export function isBotMessage(chatJid: string, messageId: string): boolean {
   const row = db
     .prepare(
