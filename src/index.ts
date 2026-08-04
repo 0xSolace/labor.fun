@@ -1506,12 +1506,14 @@ async function main(): Promise<void> {
       // knows Breadbrich Engels saw it, even if processing is queued behind other groups.
       if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
         const group = registeredGroups[chatJid];
-        const isMain = group.isMain === true;
-        const needsTrigger = !isMain && group.requiresTrigger !== false;
-        const triggered =
-          !needsTrigger ||
-          getTriggerPattern(group.trigger).test(msg.content.trim());
-        if (triggered) {
+        // ACK only on EXPLICIT engagement (mention or reply to the bot).
+        // In requiresTrigger=false chats every message wakes the agent, but
+        // reacting 👀 to all of them is noise — the sender didn't address
+        // the bot, so no receipt is owed. (Convent feedback 2026-08-04.)
+        const explicitlyTriggered =
+          getTriggerPattern(group.trigger).test(msg.content.trim()) ||
+          msg.is_reply_to_bot === true;
+        if (explicitlyTriggered) {
           const ch = findChannel(channels, chatJid);
           if (ch?.addReaction) {
             ch.addReaction(chatJid, msg.id, 'eyes').catch(() => {});
