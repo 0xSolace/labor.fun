@@ -93,6 +93,7 @@ import {
   recordPmDm,
   insertApiUsage,
 } from './db.js';
+import { isErrorShapedResult } from './error-shaped-result.js';
 import { GroupQueue } from './group-queue.js';
 import {
   advanceRunAnchor,
@@ -764,14 +765,16 @@ async function processGroupMessagesInner(chatJid: string): Promise<boolean> {
   // (detectKnowledgeGapMarker) after the run completes.
   let agentReplyText = '';
 
-  // ACK pattern: react with a thinking emoji on the triggering message,
-  // then swap to a checkmark when processing completes.
+  // NO pre-processing reaction. Salem must be silent on messages it ends up
+  // ignoring (Shadow, 2026-08-07): a run starting is NOT a commitment to
+  // reply, and in requiresTrigger=false chats every message starts a run, so
+  // any react-on-run-start pattern (thinking_face here, formerly swapped from
+  // an on-receipt eyes ACK) spammed a reaction onto every group message. The
+  // reply itself is the only signal. Dropping the reaction dance also removes
+  // the removeReaction('eyes') call that fired setMessageReaction with an
+  // empty reaction list on messages that never had a reaction, which Telegram
+  // rejects with 400 REACTION_EMPTY (see salem.error.log spam).
   const triggerMessageId = lastMsg?.id;
-  const supportsReactions = !!channel.addReaction;
-  if (supportsReactions && triggerMessageId) {
-    await channel.removeReaction!(chatJid, triggerMessageId, 'eyes');
-    await channel.addReaction!(chatJid, triggerMessageId, 'thinking_face');
-  }
 
   // Track this run's triggering message so replies anchor to the LATEST
   // message actually handed to the container. The pipe path in
@@ -791,7 +794,20 @@ async function processGroupMessagesInner(chatJid: string): Promise<boolean> {
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      if (text) {
+      // Never post error-shaped text (e.g. \"API Error: 502 error code: 502\")
+      // to the chat, even when the runner mislabels it status=success. The
+      // agent-runner classifies these too, but per-group runner copies are
+      // agent-customizable, so the host is the authoritative last line of
+      // defense. Marking hadError (with nothing sent) routes this run into
+      // the existing error path: cursor rollback + group-queue backoff retry,
+      // so the eaten user message gets reprocessed. (2026-08-06 502 incident.)
+      if (text && isErrorShapedResult(text)) {
+        hadError = true;
+        logger.error(
+          { group: group.name, resultText: text.slice(0, 300) },
+          'Error-shaped agent result suppressed (not sent to chat)',
+        );
+      } else if (text) {
         // Anchor the reply to the latest message handed to this run so it
         // lands in the right thread/topic even if another message arrived
         // (in a different thread/conversation) while the agent was working.
@@ -821,13 +837,6 @@ async function processGroupMessagesInner(chatJid: string): Promise<boolean> {
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
-
-  // Remove the thinking reaction on completion. Intentionally no follow-up
-  // reaction (e.g. ✅) — the agent's response itself is the completion
-  // signal and a trailing reaction adds visual noise.
-  if (supportsReactions && triggerMessageId) {
-    await channel.removeReaction!(chatJid, triggerMessageId, 'thinking_face');
-  }
 
   const runDuration = Date.now() - runStartTime;
 
@@ -1527,24 +1536,11 @@ async function main(): Promise<void> {
 
       storeMessage(msg);
 
-      // Immediate ACK: react to triggered messages on receipt so the sender
-      // knows Breadbrich Engels saw it, even if processing is queued behind other groups.
-      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
-        const group = registeredGroups[chatJid];
-        // ACK only on EXPLICIT engagement (mention or reply to the bot).
-        // In requiresTrigger=false chats every message wakes the agent, but
-        // reacting 👀 to all of them is noise — the sender didn't address
-        // the bot, so no receipt is owed. (Convent feedback 2026-08-04.)
-        const explicitlyTriggered =
-          getTriggerPattern(group.trigger).test(msg.content.trim()) ||
-          msg.is_reply_to_bot === true;
-        if (explicitlyTriggered) {
-          const ch = findChannel(channels, chatJid);
-          if (ch?.addReaction) {
-            ch.addReaction(chatJid, msg.id, 'eyes').catch(() => {});
-          }
-        }
-      }
+      // NO on-receipt reaction ACK. Previously this reacted 👀 to explicitly
+      // triggered messages; combined with the run-start thinking_face swap it
+      // meant a reaction landed on messages Salem never replied to. Policy
+      // (Shadow, 2026-08-07): zero reaction and zero reply on anything Salem
+      // does not answer — the reply itself is the acknowledgement.
     },
     onChatMetadata: (
       chatJid: string,
