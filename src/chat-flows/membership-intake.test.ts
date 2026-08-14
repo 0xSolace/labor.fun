@@ -22,12 +22,22 @@ const interest: MembershipInterest = {
 
 describe('intake tool sandbox', () => {
   it('allows only read-only tools — no write/exec/IPC/integration tools', () => {
-    expect(INTAKE_ALLOWED_TOOLS).toEqual(['Read', 'Glob', 'Grep', 'WebFetch']);
+    // Includes both legacy WebFetch and the opus-5 renamed web_fetch; the SDK
+    // permission layer matches these literally, so both names must be listed.
+    expect(INTAKE_ALLOWED_TOOLS).toEqual([
+      'Read',
+      'Glob',
+      'Grep',
+      'WebFetch',
+      'web_fetch',
+    ]);
     for (const banned of [
       'Bash',
+      'exec',
       'Write',
       'Edit',
       'Task',
+      'Agent',
       'mcp__nanoclaw__*',
       'mcp__github__*',
       'mcp__gws__*',
