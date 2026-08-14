@@ -300,16 +300,32 @@ export class ClaudeBackend implements Backend {
           : undefined,
         // A restricted allowlist (e.g. the sandboxed membership-intake flow)
         // replaces the default tool set entirely.
+        //
+        // NOTE (2026-08-14): opus-5 emits the RENAMED native tool names
+        // (exec / web_fetch / web_search / Agent) instead of the legacy
+        // Bash / WebFetch / WebSearch / Task. The bundled CLI registers BOTH
+        // sets, but the SDK permission layer matches allowlist entries
+        // LITERALLY -- so a model calling `exec` against a list that only has
+        // `Bash` gets `<tool_use_error>No such tool available</tool_use_error>`.
+        // Fix: list BOTH the legacy and the new names. Harmless to over-list.
         allowedTools: containerInput.allowedTools ?? [
+          // shell
           'Bash',
+          'exec',
+          // file ops (unchanged names)
           'Read',
           'Write',
           'Edit',
           'Glob',
           'Grep',
+          // web (legacy + renamed)
           'WebSearch',
+          'web_search',
           'WebFetch',
+          'web_fetch',
+          // subagent/task (legacy + renamed)
           'Task',
+          'Agent',
           'TaskOutput',
           'TaskStop',
           'TeamCreate',

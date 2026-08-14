@@ -56,7 +56,16 @@ export const MEMBERSHIP_NOTIFY_JID = envVal('MEMBERSHIP_NOTIFY_JID');
  * message can't reach org data or side effects. The agent's reply is streamed
  * back regardless of tools, so no send tool is needed.
  */
-export const INTAKE_ALLOWED_TOOLS = ['Read', 'Glob', 'Grep', 'WebFetch'];
+// WebFetch/web_fetch: legacy + opus-5 renamed name (allowlist is matched
+// literally; over-listing is harmless). Deliberately NO shell (exec/Bash) here
+// -- this is the restricted PUBLIC intake sandbox.
+export const INTAKE_ALLOWED_TOOLS = [
+  'Read',
+  'Glob',
+  'Grep',
+  'WebFetch',
+  'web_fetch',
+];
 
 /** Sentinel the agent emits (on its own line) when a user firmly opts in. */
 export const MEMBERSHIP_INTEREST_SENTINEL = '[[MEMBERSHIP_INTEREST]]';
