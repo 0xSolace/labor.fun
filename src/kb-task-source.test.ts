@@ -150,3 +150,24 @@ body`,
     expect(loadPmTasksFromKb(dir)).toHaveLength(1);
   });
 });
+
+describe('meal-shift reminder exclusion', () => {
+  it('excludes past shifts but keeps today, future, and ordinary overdue tasks', () => {
+    const nowMs = Date.parse('2026-08-24T18:25:00Z'); // 14:25 America/New_York
+    const add = (id: string, due: string) =>
+      writeTask(
+        `${id}.md`,
+        `---\nid: ${id}\ntitle: ${id}\nstatus: open\ndue_date: ${due}\nowners: [Resident]\n---\n`,
+      );
+    add('TASK-MS-20260821', '2026-08-21');
+    add('TASK-MS-20260824', '2026-08-24');
+    add('TASK-MS-20260826', '2026-08-26');
+    add('TASK-123', '2026-08-21');
+
+    expect(
+      loadDeadlineItemsFromKb(dir, nowMs)
+        .map((item) => item.id)
+        .sort(),
+    ).toEqual(['TASK-123', 'TASK-MS-20260824', 'TASK-MS-20260826']);
+  });
+});

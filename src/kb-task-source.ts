@@ -21,6 +21,31 @@ import { logger } from './logger.js';
 import type { DeadlineItem } from './reminder-engine.js';
 import type { PmTask } from './pm-orchestration.js';
 
+const HOUSE_TIME_ZONE = 'America/New_York';
+
+function dateKeyInHouseTimeZone(nowMs: number): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: HOUSE_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date(nowMs));
+  const get = (type: string) => parts.find((part) => part.type === type)?.value;
+  return `${get('year')}${get('month')}${get('day')}`;
+}
+
+/** Past-date meal shifts are operational history, never reminder candidates. */
+export function isPastMealShiftTask(
+  file: string,
+  id: string,
+  nowMs: number,
+): boolean {
+  const match =
+    /^TASK-MS-(\d{8})(?:-\d+)?(?:\.md)?$/.exec(file) ||
+    /^TASK-MS-(\d{8})(?:-\d+)?$/.exec(id);
+  return !!match && match[1] < dateKeyInHouseTimeZone(nowMs);
+}
+
 /** Coerce a frontmatter value that may be a YAML list or a scalar into string[]. */
 function toStringArray(value: unknown): string[] {
   if (Array.isArray(value)) {
@@ -57,6 +82,7 @@ export function sharedKbTasksDir(): string {
  */
 export function loadDeadlineItemsFromKb(
   tasksDir: string = sharedKbTasksDir(),
+  nowMs: number = Date.now(),
 ): DeadlineItem[] {
   let files: string[];
   try {
@@ -75,6 +101,9 @@ export function loadDeadlineItemsFromKb(
       if (!deadline) continue; // no machine-readable deadline → skip
 
       const id = firstString(fm.id) || file.replace(/\.md$/, '');
+      // The profile sweep closes these on its tick. This source-level guard
+      // prevents a startup race from emitting one final overdue blast first.
+      if (isPastMealShiftTask(file, id, nowMs)) continue;
 
       items.push({
         id,
