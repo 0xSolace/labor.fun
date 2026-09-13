@@ -22,9 +22,11 @@ import {
   updateTask,
   updateTaskAfterRun,
 } from './db.js';
+import { isErrorShapedResult } from './error-shaped-result.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
+import { stripInternalTags } from './router.js';
 import { parseIntervalMs } from './schedule-interval.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
@@ -200,9 +202,25 @@ async function runTask(
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
-          result = streamedOutput.result;
-          // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          const visible = stripInternalTags(streamedOutput.result);
+          // Same last line of defense as the chat path (index.ts): never post
+          // error-shaped text such as a usage-limit notice, even when the
+          // runner labelled it success. Per-group runner copies are
+          // agent-customizable, so the container-side classifier alone isn't
+          // enough. Recording it as the run's error keeps last_result honest.
+          // (2026-09-11: a scheduled task posted "You've hit your limit ·
+          // resets 10pm" into The Convent's house chat.)
+          if (visible && isErrorShapedResult(visible)) {
+            error = visible.slice(0, 300);
+            logger.error(
+              { taskId: task.id, resultText: visible.slice(0, 300) },
+              'Error-shaped task result suppressed (not sent to chat)',
+            );
+          } else {
+            result = streamedOutput.result;
+            // Forward result to user (sendMessage handles formatting)
+            await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          }
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {
