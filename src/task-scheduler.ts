@@ -229,6 +229,10 @@ async function runTask(
         }
         if (streamedOutput.status === 'error') {
           error = streamedOutput.error || 'Unknown error';
+          // A task run is single-turn, so nothing follows an error: release
+          // the container now rather than at the ~30 min hard timeout. Until
+          // it exits, the group's chat can't be piped into a task container.
+          scheduleClose();
         }
       },
     );

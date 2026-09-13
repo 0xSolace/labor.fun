@@ -2,8 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { _initTestDatabase, createTask, getTaskById } from './db.js';
 
-// What the (mocked) container run hands back through the streaming callback.
-const run = vi.hoisted(() => ({ result: '' }));
+// What the (mocked) container run reports through the streaming callback.
+const run = vi.hoisted(() => ({
+  status: 'success' as 'success' | 'error',
+  result: null as string | null,
+  error: undefined as string | undefined,
+  release: undefined as (() => void) | undefined,
+}));
 
 vi.mock('./container-runner.js', () => ({
   writeTasksSnapshot: vi.fn(),
@@ -12,10 +17,25 @@ vi.mock('./container-runner.js', () => ({
       _group: unknown,
       _input: unknown,
       _onProcess: unknown,
-      onOutput: (o: { status: string; result: string | null }) => Promise<void>,
+      onOutput: (o: {
+        status: string;
+        result: string | null;
+        error?: string;
+      }) => Promise<void>,
     ) => {
-      await onOutput({ status: 'success', result: run.result });
-      return { status: 'success', result: run.result };
+      await onOutput({
+        status: run.status,
+        result: run.result,
+        error: run.error,
+      });
+      // Like the real runner, the container stays up waiting for more input
+      // until the host closes its stdin, or until the ~30.5 min hard timeout.
+      await new Promise<void>((resolve) => {
+        run.release = resolve;
+        setTimeout(resolve, 1_830_000);
+      });
+      // Streaming mode: the real runner always finishes with result: null.
+      return { status: run.status, result: null, error: run.error };
     },
   ),
 }));
@@ -33,6 +53,7 @@ import {
 
 const JID = 'tg:-1003686659419';
 const FOLDER = 'house';
+const TASK_CLOSE_DELAY_MS = 10_000;
 
 function createDueTask(id: string): void {
   createTask({
@@ -51,7 +72,14 @@ function createDueTask(id: string): void {
 
 async function runDueTasks(
   sendMessage: (jid: string, text: string) => Promise<void>,
-): Promise<void> {
+) {
+  const queue = {
+    enqueueTask: (_jid: string, _id: string, fn: () => Promise<void>) => {
+      void fn();
+    },
+    closeStdin: vi.fn(() => run.release?.()),
+    notifyIdle: vi.fn(),
+  };
   startSchedulerLoop({
     registeredGroups: () => ({
       [JID]: {
@@ -62,17 +90,13 @@ async function runDueTasks(
       } as any,
     }),
     getSessions: () => ({}),
-    queue: {
-      enqueueTask: (_jid: string, _id: string, fn: () => Promise<void>) => {
-        void fn();
-      },
-      closeStdin: vi.fn(),
-      notifyIdle: vi.fn(),
-    } as any,
+    queue: queue as any,
     onProcess: () => {},
     sendMessage,
   });
-  await vi.advanceTimersByTimeAsync(10);
+  // Past the scheduler's close delay, far short of the runner's hard timeout.
+  await vi.advanceTimersByTimeAsync(TASK_CLOSE_DELAY_MS + 10);
+  return queue;
 }
 
 describe('scheduled task result forwarding', () => {
@@ -80,6 +104,10 @@ describe('scheduled task result forwarding', () => {
     _initTestDatabase();
     _resetSchedulerLoopForTests();
     vi.useFakeTimers();
+    run.status = 'success';
+    run.result = null;
+    run.error = undefined;
+    run.release = undefined;
   });
 
   afterEach(() => {
@@ -135,5 +163,23 @@ describe('scheduled task result forwarding', () => {
     await runDueTasks(sendMessage);
 
     expect(sendMessage).toHaveBeenCalledWith(JID, run.result);
+  });
+
+  it('releases the container promptly when the runner itself reports an error', async () => {
+    // The container-side classifier turns a limit notice into status:error
+    // with no result. Without a close, the task container (and the group's
+    // chat, which can't be piped into it) is held until the hard timeout.
+    run.status = 'error';
+    run.error = "You've hit your limit · resets 10pm (America/New_York)";
+    createDueTask('t-runner-error');
+    const sendMessage = vi.fn(async () => {});
+
+    const queue = await runDueTasks(sendMessage);
+
+    expect(queue.closeStdin).toHaveBeenCalledWith(JID);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(getTaskById('t-runner-error')?.last_result).toBe(
+      "Error: You've hit your limit · resets 10pm (America/New_York)",
+    );
   });
 });
