@@ -100,16 +100,18 @@ describe('scheduled task result forwarding', () => {
   });
 
   it('classifies what is left after stripping <internal> blocks', async () => {
+    // Anchored pattern: the raw string starts with "<internal>", so this is
+    // only suppressed if the guard classifies the stripped text.
     run.result =
-      '<internal>checked the rotation file</internal>API Error: 502 error code: 502';
-    createDueTask('t-internal-then-error');
+      "<internal>checked the rotation file</internal>You've hit your limit · resets 10pm (America/New_York)";
+    createDueTask('t-internal-then-limit');
     const sendMessage = vi.fn(async () => {});
 
     await runDueTasks(sendMessage);
 
     expect(sendMessage).not.toHaveBeenCalled();
-    expect(getTaskById('t-internal-then-error')?.last_result).toMatch(
-      /^Error: API Error: 502/,
+    expect(getTaskById('t-internal-then-limit')?.last_result).toBe(
+      "Error: You've hit your limit · resets 10pm (America/New_York)",
     );
   });
 
