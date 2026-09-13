@@ -13,15 +13,19 @@
  *
  * Resolution is deliberately conservative:
  *  - omitted                  → the current chat (unchanged behaviour)
+ *  - the current chat's own id without its prefix → the current chat. This is
+ *    unambiguous even for ids that themselves contain colons (Teams "19:…",
+ *    web "site:session", Signal "group:…"), so it is checked first.
  *  - "telegram:…", or a known prefix in the wrong case
  *                             → canonical prefix; the id itself is untouched
- *  - bare id of the current chat
- *                             → the current chat (unambiguous)
- *  - any other bare id        → rejected with the corrected form, so the model
- *                               can fix it within the same run
  *  - any other prefix         → passed through; the orchestrator still judges
  *                               deliverability, and plugin channels may own
  *                               prefixes this file doesn't know about
+ *  - any other bare id        → rejected, so the model can fix it within the
+ *                               same run. The error lists full-JID shapes
+ *                               instead of guessing a platform, because the
+ *                               target is often on a different channel from
+ *                               the chat the agent is running in.
  */
 
 const CANONICAL_PREFIX: Record<string, string> = {
@@ -31,15 +35,6 @@ const CANONICAL_PREFIX: Record<string, string> = {
   dc: 'dc',
   signal: 'signal',
   teams: 'teams',
-  web: 'web',
-};
-
-const PLATFORM_NAME: Record<string, string> = {
-  tg: 'Telegram',
-  slack: 'Slack',
-  dc: 'Discord',
-  signal: 'Signal',
-  teams: 'Teams',
   web: 'web',
 };
 
@@ -58,8 +53,16 @@ export function resolveTargetJid(
 ): TargetJidResolution {
   const raw = target?.trim();
   if (!raw) return { ok: true, jid: currentChatJid };
-  if (raw === currentChatJid || isWhatsAppJid(raw))
+  if (raw === currentChatJid || isWhatsAppJid(raw)) {
     return { ok: true, jid: raw };
+  }
+
+  // Before the prefix split: an id that itself contains a colon would
+  // otherwise be mistaken for a prefixed jid and passed straight through.
+  const curSep = currentChatJid.indexOf(':');
+  if (curSep > 0 && raw === currentChatJid.slice(curSep + 1)) {
+    return { ok: true, jid: currentChatJid };
+  }
 
   const sep = raw.indexOf(':');
   if (sep > 0) {
@@ -70,21 +73,12 @@ export function resolveTargetJid(
     };
   }
 
-  const curSep = currentChatJid.indexOf(':');
-  const curPrefix = curSep > 0 ? currentChatJid.slice(0, curSep) : '';
-  if (curPrefix && raw === currentChatJid.slice(curSep + 1)) {
-    return { ok: true, jid: currentChatJid };
-  }
-
-  const platform = PLATFORM_NAME[curPrefix];
-  const hint = platform
-    ? ` If you meant a ${platform} chat, use "${curPrefix}:${raw}".`
-    : '';
   return {
     ok: false,
     error:
-      `${param} "${raw}" has no platform prefix, so no channel can deliver to it — nothing was sent.` +
-      hint +
-      ` To reach the current chat, omit ${param}.`,
+      `${param} "${raw}" has no platform prefix, so no channel can deliver to it — nothing was sent. ` +
+      `Use the full JID including its prefix, e.g. "tg:-1001234567890" (Telegram group), ` +
+      `"tg:1234567890" (Telegram DM) or "slack:C0123456789". ` +
+      `To reach the current chat, omit ${param}.`,
   };
 }

@@ -25,6 +25,24 @@ describe('resolveTargetJid', () => {
     });
   });
 
+  it('routes the bare id of the current chat even when that id contains colons', () => {
+    const teams = 'teams:19:abc123@thread.v2';
+    const web = 'web:site1:sess1';
+    const signalGroup = 'signal:group:QUJDREVG+/=';
+    expect(resolveTargetJid('19:abc123@thread.v2', teams)).toEqual({
+      ok: true,
+      jid: teams,
+    });
+    expect(resolveTargetJid('site1:sess1', web)).toEqual({
+      ok: true,
+      jid: web,
+    });
+    expect(resolveTargetJid('group:QUJDREVG+/=', signalGroup)).toEqual({
+      ok: true,
+      jid: signalGroup,
+    });
+  });
+
   it('rewrites the spelled-out telegram: prefix', () => {
     expect(resolveTargetJid('telegram:-1003686659419', HOUSE)).toEqual({
       ok: true,
@@ -73,21 +91,31 @@ describe('resolveTargetJid', () => {
     });
   });
 
-  it('passes unknown prefixes through for plugin-registered channels', () => {
-    expect(resolveTargetJid('gh:org/repo#12', HOUSE)).toEqual({
+  it('passes unknown prefixes through for other and plugin-registered channels', () => {
+    expect(resolveTargetJid('gh:org/repo/12', HOUSE)).toEqual({
       ok: true,
-      jid: 'gh:org/repo#12',
+      jid: 'gh:org/repo/12',
+    });
+    expect(resolveTargetJid('dc-dm:123456789', HOUSE)).toEqual({
+      ok: true,
+      jid: 'dc-dm:123456789',
     });
   });
 
-  it('rejects any other bare id and suggests the prefixed form', () => {
+  it('rejects any other bare id and shows the full-JID shapes', () => {
     const r = resolveTargetJid('7760895633', HOUSE);
     expect(r.ok).toBe(false);
     if (!r.ok) {
-      expect(r.error).toContain('"tg:7760895633"');
       expect(r.error).toContain('nothing was sent');
+      expect(r.error).toContain('"tg:1234567890" (Telegram DM)');
       expect(r.error).toContain('omit target_jid');
     }
+  });
+
+  it("doesn't steer a cross-channel send onto the current chat's platform", () => {
+    const r = resolveTargetJid('7760895633', 'slack:C0123456789');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).not.toContain('slack:7760895633');
   });
 
   it('rejects a leading-colon value rather than treating it as prefixed', () => {
@@ -101,11 +129,5 @@ describe('resolveTargetJid', () => {
       expect(r.error).toContain('target_group_jid "123"');
       expect(r.error).toContain('omit target_group_jid');
     }
-  });
-
-  it('rejects without a platform hint when the current chat has no prefix', () => {
-    const r = resolveTargetJid('555', '120363@g.us');
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error).not.toContain('If you meant');
   });
 });
