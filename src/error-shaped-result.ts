@@ -1,3 +1,14 @@
+// Rate-limit notices the bundled Claude CLI emits as a result's text (x0z/_h6
+// and the Opus off-switch in @anthropic-ai/claude-agent-sdk 0.2.107's cli.js):
+//   "You've hit your limit" / "…session limit" / "…weekly limit" /
+//   "…Opus limit" / "…Sonnet limit" / "…usage limit"
+//   "You're out of extra usage"
+// each followed by " · resets <when>" only when the API sent a reset time;
+// "Opus is experiencing high load, please use /model to switch to Sonnet";
+// and the older CLI's "Claude AI usage limit reached|<epoch>".
+const CLI_RATE_LIMIT_NOTICE =
+  /^(?:(?:you['’]ve hit your (?:(?:session|weekly|opus|sonnet|usage) )?limit|you['’]re out of extra usage)(?:\s*[·∙•]\s*resets\b|\s*$)|opus is experiencing high load\b|claude ai usage limit reached\|\d+)/i;
+
 /**
  * Detect "error-shaped" agent results: text a runner emitted as a SUCCESS
  * result whose content is actually a raw API/proxy failure, e.g.
@@ -13,11 +24,17 @@
  *  - "API Error" must lead the text (the SDK emits it as a prefix), or
  *  - "error code: NNN" matches only when the whole text is short enough to
  *    plainly be an error blob rather than prose.
+ *  - rate-limit notices match only in the shapes the bundled CLI builds (see
+ *    CLI_RATE_LIMIT_NOTICE), so a reply like "you've hit your limit of 10
+ *    hearts" still goes out. Receipt: 2026-09-11, when "You've hit your limit
+ *    · resets 10pm (America/New_York)" was posted verbatim into The Convent's
+ *    house chat, by chat replies and a scheduled task alike.
  */
 export function isErrorShapedResult(text: string): boolean {
   const t = text.trim();
   if (t.length === 0) return false;
   if (/^API Error\b/i.test(t)) return true;
   if (t.length <= 300 && /\berror code:? \d{3}\b/i.test(t)) return true;
+  if (t.length <= 300 && CLI_RATE_LIMIT_NOTICE.test(t)) return true;
   return false;
 }

@@ -55,4 +55,67 @@ describe("isErrorShapedResult", () => {
       ),
     ).toBe(false);
   });
+  it("classifies the 2026-09-11 subscription usage-limit notice as an error", () => {
+    expect(
+      isErrorShapedResult("You've hit your limit · resets 10pm (America/New_York)"),
+    ).toBe(true);
+    expect(isErrorShapedResult("You’ve hit your usage limit ∙ resets 3am")).toBe(
+      true,
+    );
+  });
+
+  it("classifies the legacy CLI usage-limit blob as an error", () => {
+    expect(isErrorShapedResult("Claude AI usage limit reached|1757624400")).toBe(
+      true,
+    );
+  });
+
+  it("does NOT flag replies about limits that aren't the CLI notice", () => {
+    expect(
+      isErrorShapedResult(
+        "you've hit your limit of 10 hearts this month, it resets on the 1st",
+      ),
+    ).toBe(false);
+    expect(
+      isErrorShapedResult("you've hit your limit - resets tomorrow morning"),
+    ).toBe(false);
+    expect(
+      isErrorShapedResult(
+        "Claude AI usage limit reached yesterday, which is why i went quiet",
+      ),
+    ).toBe(false);
+  });
+  it("classifies every rate-limit shape the bundled CLI builds", () => {
+    const resets = " · resets 10pm (America/New_York)";
+    for (const kind of [
+      "limit",
+      "session limit",
+      "weekly limit",
+      "Opus limit",
+      "Sonnet limit",
+      "usage limit",
+    ]) {
+      expect(isErrorShapedResult(`You've hit your ${kind}${resets}`)).toBe(true);
+      expect(isErrorShapedResult(`You've hit your ${kind}`)).toBe(true);
+    }
+    expect(isErrorShapedResult(`You're out of extra usage${resets}`)).toBe(true);
+    expect(isErrorShapedResult("You're out of extra usage")).toBe(true);
+    expect(
+      isErrorShapedResult(
+        "Opus is experiencing high load, please use /model to switch to Sonnet",
+      ),
+    ).toBe(true);
+  });
+
+  it("does NOT flag a reply that only starts like a limit notice", () => {
+    expect(
+      isErrorShapedResult(
+        "you're out of extra usage credits on the house account, ask shadow",
+      ),
+    ).toBe(false);
+    expect(isErrorShapedResult("you've hit your limit for hearts this month")).toBe(
+      false,
+    );
+  });
+
 });
