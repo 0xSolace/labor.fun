@@ -1715,19 +1715,33 @@ server.tool(
       ),
   },
   async (args) => {
+    const target = resolveTargetJid(
+      args.target_telegram_jid,
+      chatJid,
+      'target_telegram_jid',
+    );
+    if (!target.ok) {
+      return {
+        content: [{ type: 'text' as const, text: target.error }],
+        isError: true,
+      };
+    }
     const data = {
       type: 'add_kb_user',
       username: args.username,
-      target_telegram_jid: args.target_telegram_jid,
+      // The orchestrator requires this field and delivers to it as given, so
+      // it is always sent resolved.
+      target_telegram_jid: target.jid,
       groupFolder,
       timestamp: new Date().toISOString(),
     };
     writeIpcFile(MESSAGES_DIR, data);
+    const dest = target.jid === chatJid ? 'this chat' : target.jid;
     return {
       content: [
         {
           type: 'text' as const,
-          text: `KB user creation queued for ${args.username}; credentials will be DM'd to ${args.target_telegram_jid}. Will be rejected by the orchestrator if the caller is not allowlisted.`,
+          text: `KB user creation queued for ${args.username}; credentials will be DM'd to ${dest}. Will be rejected by the orchestrator if the caller is not allowlisted.`,
         },
       ],
     };
