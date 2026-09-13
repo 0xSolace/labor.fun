@@ -7,7 +7,7 @@ import {
   currentRunAnchor,
 } from './run-trigger-anchor.js';
 
-const JID = 'tg:-1003686659419';
+const JID = 'tg:-1001234567890';
 const OTHER = 'tg:555';
 
 beforeEach(() => {
