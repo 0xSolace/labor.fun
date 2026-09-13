@@ -89,6 +89,42 @@ describe('isErrorShapedResult', () => {
       ),
     ).toBe(false);
   });
+  it('classifies every rate-limit shape the bundled CLI builds', () => {
+    const resets = ' · resets 10pm (America/New_York)';
+    for (const kind of [
+      'limit',
+      'session limit',
+      'weekly limit',
+      'Opus limit',
+      'Sonnet limit',
+      'usage limit',
+    ]) {
+      expect(isErrorShapedResult(`You've hit your ${kind}${resets}`)).toBe(
+        true,
+      );
+      expect(isErrorShapedResult(`You've hit your ${kind}`)).toBe(true);
+    }
+    expect(isErrorShapedResult(`You're out of extra usage${resets}`)).toBe(
+      true,
+    );
+    expect(isErrorShapedResult("You're out of extra usage")).toBe(true);
+    expect(
+      isErrorShapedResult(
+        'Opus is experiencing high load, please use /model to switch to Sonnet',
+      ),
+    ).toBe(true);
+  });
+
+  it('does NOT flag a reply that only starts like a limit notice', () => {
+    expect(
+      isErrorShapedResult(
+        "you're out of extra usage credits on the house account, ask shadow",
+      ),
+    ).toBe(false);
+    expect(
+      isErrorShapedResult("you've hit your limit for hearts this month"),
+    ).toBe(false);
+  });
 });
 
 describe('error-shaped-result duplication', () => {

@@ -469,8 +469,16 @@ export class ClaudeBackend implements Backend {
         // explicitly non-success subtypes (error_max_turns, ...). The host
         // treats status=error with no sent output as retryable: it rolls the
         // message cursor back and re-runs the turn with backoff.
+        // The CLI marks its own synthetic API-error results (429 usage-limit
+        // notices, overload messages) with is_error on an otherwise-success
+        // result, so trust that whatever the wording. Only when there is text:
+        // an empty is_error result has nothing to leak, and treating it as an
+        // error would newly trigger a retry.
+        const sdkFlaggedError =
+          (message as { is_error?: boolean }).is_error === true && !!textResult;
         const errorShaped =
           message.subtype !== 'success' ||
+          sdkFlaggedError ||
           (!!textResult && isErrorShapedResult(textResult));
         if (errorShaped) {
           log(
