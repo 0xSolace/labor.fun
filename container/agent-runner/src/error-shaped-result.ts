@@ -13,11 +13,23 @@
  *  - "API Error" must lead the text (the SDK emits it as a prefix), or
  *  - "error code: NNN" matches only when the whole text is short enough to
  *    plainly be an error blob rather than prose.
+ *  - subscription usage-limit notices match only in the exact shapes the CLI
+ *    emits, so a reply like "you've hit your limit of 10 hearts" still goes
+ *    out. Receipt: 2026-09-11, when "You've hit your limit · resets 10pm
+ *    (America/New_York)" was posted verbatim into The Convent's house chat,
+ *    by chat replies and a scheduled task alike.
  */
 export function isErrorShapedResult(text: string): boolean {
   const t = text.trim();
   if (t.length === 0) return false;
   if (/^API Error\b/i.test(t)) return true;
   if (t.length <= 300 && /\berror code:? \d{3}\b/i.test(t)) return true;
+  if (
+    t.length <= 300 &&
+    /^(?:you['’]ve hit your (?:usage )?limit\s*[·∙•]\s*resets\b|claude ai usage limit reached\|\d+)/i.test(
+      t,
+    )
+  )
+    return true;
   return false;
 }
