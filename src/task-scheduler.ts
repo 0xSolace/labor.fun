@@ -209,7 +209,7 @@ async function runTask(
           // agent-customizable, so the container-side classifier alone isn't
           // enough. Recording it as the run's error keeps last_result honest.
           // (2026-09-11: a scheduled task posted "You've hit your limit ·
-          // resets 10pm" into The Convent's house chat.)
+          // resets 10pm" into a group chat.)
           if (visible && isErrorShapedResult(visible)) {
             error = visible.slice(0, 300);
             logger.error(

@@ -808,7 +808,7 @@ async function processGroupMessagesInner(chatJid: string): Promise<boolean> {
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      // Never post error-shaped text (e.g. \"API Error: 502 error code: 502\")
+      // Never post error-shaped text (e.g. "API Error: 502 error code: 502")
       // to the chat, even when the runner mislabels it status=success. The
       // agent-runner classifies these too, but per-group runner copies are
       // agent-customizable, so the host is the authoritative last line of
