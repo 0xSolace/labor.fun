@@ -12,6 +12,7 @@ import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
 import { parseIntervalMs } from './schedule-interval.js';
+import { resolveKbUserTarget } from './kb-user-target.js';
 import { resolveTargetJid } from './target-jid.js';
 
 const IPC_DIR = '/workspace/ipc';
@@ -1715,11 +1716,10 @@ server.tool(
       ),
   },
   async (args) => {
-    const target = resolveTargetJid(
-      args.target_telegram_jid,
-      chatJid,
-      'target_telegram_jid',
-    );
+    // The orchestrator creates the account and posts its password to this jid
+    // as given, so only an explicit recipient is accepted. A rejection writes
+    // no IPC, so no account is created.
+    const target = resolveKbUserTarget(args.target_telegram_jid, chatJid);
     if (!target.ok) {
       return {
         content: [{ type: 'text' as const, text: target.error }],
@@ -1729,19 +1729,16 @@ server.tool(
     const data = {
       type: 'add_kb_user',
       username: args.username,
-      // The orchestrator requires this field and delivers to it as given, so
-      // it is always sent resolved.
       target_telegram_jid: target.jid,
       groupFolder,
       timestamp: new Date().toISOString(),
     };
     writeIpcFile(MESSAGES_DIR, data);
-    const dest = target.jid === chatJid ? 'this chat' : target.jid;
     return {
       content: [
         {
           type: 'text' as const,
-          text: `KB user creation queued for ${args.username}; credentials will be DM'd to ${dest}. Will be rejected by the orchestrator if the caller is not allowlisted.`,
+          text: `KB user creation queued for ${args.username}; credentials will be DM'd to ${target.jid}. Will be rejected by the orchestrator if the caller is not allowlisted.`,
         },
       ],
     };
