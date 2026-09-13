@@ -1702,7 +1702,7 @@ server.tool(
 
 server.tool(
   'add_kb_user',
-  'Create a new KB-UI dashboard user with a generated password and DM the credentials to a target Telegram chat. Requires an allowlisted caller (sender_context present). Password is generated server-side and never appears in the response — it is only sent via the DM. Returns status only.',
+  'Create a new KB-UI dashboard user with a generated password and DM the credentials to the new user in their own Telegram DM, never a group chat. Requires an allowlisted caller (sender_context present). Password is generated server-side and never appears in the response — it is only sent via the DM. Returns status only.',
   {
     username: z
       .string()
@@ -1712,7 +1712,7 @@ server.tool(
     target_telegram_jid: z
       .string()
       .describe(
-        'Telegram JID to DM the credentials to (format: "tg:<chat_id>", e.g. "tg:459838633").',
+        'DM JID of the new user, where the credentials are sent (format: "tg:<user_id>", e.g. "tg:1234567890"). Credentials must go to the new user in their own DM, never a group: a group chat is rejected and no account is created.',
       ),
   },
   async (args) => {
