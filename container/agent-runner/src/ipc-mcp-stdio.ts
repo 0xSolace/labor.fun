@@ -1702,7 +1702,7 @@ server.tool(
 
 server.tool(
   'add_kb_user',
-  'Create a new KB-UI dashboard user with a generated password and DM the credentials to the new user in their own Telegram DM, never a group chat. Requires an allowlisted caller (sender_context present). Password is generated server-side and never appears in the response — it is only sent via the DM. Returns status only.',
+  'Create a new KB-UI dashboard user with a generated password and DM the credentials to the new user. The target must be the new user\'s own direct-message JID (e.g. "tg:1234567890"); group chats and other non-DM targets are rejected and no account is created. Requires an allowlisted caller (sender_context present). Password is generated server-side and never appears in the response — it is only sent via the DM. Returns status only.',
   {
     username: z
       .string()
@@ -1712,13 +1712,13 @@ server.tool(
     target_telegram_jid: z
       .string()
       .describe(
-        'DM JID of the new user, where the credentials are sent (format: "tg:<user_id>", e.g. "tg:1234567890"). Credentials must go to the new user in their own DM, never a group: a group chat is rejected and no account is created.',
+        'The new user\'s own direct-message JID, where the credentials are sent, e.g. "tg:1234567890". Accepted forms: tg:<user id>, <phone>@s.whatsapp.net, signal:<+phone or uuid>, slack:<id starting with D, U or W>, dc-dm:<user id>. Group chats and other non-DM targets are rejected and no account is created.',
       ),
   },
   async (args) => {
-    // The orchestrator creates the account and posts its password to this jid
-    // as given, so only an explicit recipient is accepted. A rejection writes
-    // no IPC, so no account is created.
+    // The orchestrator creates the account, then posts its password to this
+    // jid, so only the new user's own DM jid is accepted (see
+    // kb-user-target.ts). A rejection writes no IPC, so no account is created.
     const target = resolveKbUserTarget(args.target_telegram_jid, chatJid);
     if (!target.ok) {
       return {
