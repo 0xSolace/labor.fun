@@ -12,6 +12,7 @@ import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
 import { parseIntervalMs } from './schedule-interval.js';
+import { resolveKbUserTarget } from './kb-user-target.js';
 import { resolveTargetJid } from './target-jid.js';
 
 const IPC_DIR = '/workspace/ipc';
@@ -1701,7 +1702,7 @@ server.tool(
 
 server.tool(
   'add_kb_user',
-  'Create a new KB-UI dashboard user with a generated password and DM the credentials to a target Telegram chat. Requires an allowlisted caller (sender_context present). Password is generated server-side and never appears in the response — it is only sent via the DM. Returns status only.',
+  'Create a new KB-UI dashboard user with a generated password and DM the credentials to the new user. The target must be the new user\'s own direct-message JID (e.g. "tg:1234567890"); group chats and other non-DM targets are rejected and no account is created. Requires an allowlisted caller (sender_context present). Password is generated server-side and never appears in the response — it is only sent via the DM. Returns status only.',
   {
     username: z
       .string()
@@ -1711,14 +1712,24 @@ server.tool(
     target_telegram_jid: z
       .string()
       .describe(
-        'Telegram JID to DM the credentials to (format: "tg:<chat_id>", e.g. "tg:459838633").',
+        'The new user\'s own direct-message JID, where the credentials are sent, e.g. "tg:1234567890". Accepted forms: tg:<user id>, <digits, no +>@s.whatsapp.net, signal:<+phone or uuid>, slack:<id starting with D, U or W>, dc-dm:<user id>. Group chats and other non-DM targets are rejected and no account is created.',
       ),
   },
   async (args) => {
+    // The orchestrator creates the account, then posts its password to this
+    // jid, so only the new user's own DM jid is accepted (see
+    // kb-user-target.ts). A rejection writes no IPC, so no account is created.
+    const target = resolveKbUserTarget(args.target_telegram_jid, chatJid);
+    if (!target.ok) {
+      return {
+        content: [{ type: 'text' as const, text: target.error }],
+        isError: true,
+      };
+    }
     const data = {
       type: 'add_kb_user',
       username: args.username,
-      target_telegram_jid: args.target_telegram_jid,
+      target_telegram_jid: target.jid,
       groupFolder,
       timestamp: new Date().toISOString(),
     };
@@ -1727,7 +1738,7 @@ server.tool(
       content: [
         {
           type: 'text' as const,
-          text: `KB user creation queued for ${args.username}; credentials will be DM'd to ${args.target_telegram_jid}. Will be rejected by the orchestrator if the caller is not allowlisted.`,
+          text: `KB user creation queued for ${args.username}. If the orchestrator accepts it, the credentials go to ${target.jid}. It may still reject the request (caller not allowlisted, username taken or invalid) or fail to deliver the credentials, and nothing is reported back here.`,
         },
       ],
     };

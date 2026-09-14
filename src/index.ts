@@ -507,11 +507,25 @@ async function processChatFlow(
           typeof result.result === 'string'
             ? result.result
             : JSON.stringify(result.result);
+        const text = stripInternalTags(raw);
+        // Same guard as the main chat path (processGroupMessagesInner): an
+        // error-shaped result (a raw API failure or usage-limit notice) is
+        // never handed to the flow, whose reply would carry it to the external
+        // channel. With nothing sent, the error path below rolls the cursor
+        // back for a retry.
+        if (isErrorShapedResult(text)) {
+          hadError = true;
+          logger.error(
+            { chatJid, flow: flow.name, resultText: text.slice(0, 300) },
+            'Error-shaped agent result suppressed (not sent to chat)',
+          );
+          return;
+        }
         // A broken flow must not take down message processing.
         let reply = '';
         try {
           reply = await flow.onAgentResult(
-            stripInternalTags(raw),
+            text,
             triggerMsg,
             chatJid,
             chatFlowHost,
@@ -794,7 +808,7 @@ async function processGroupMessagesInner(chatJid: string): Promise<boolean> {
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      // Never post error-shaped text (e.g. \"API Error: 502 error code: 502\")
+      // Never post error-shaped text (e.g. "API Error: 502 error code: 502")
       // to the chat, even when the runner mislabels it status=success. The
       // agent-runner classifies these too, but per-group runner copies are
       // agent-customizable, so the host is the authoritative last line of

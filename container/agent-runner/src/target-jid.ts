@@ -5,11 +5,12 @@
  *
  * Every channel's ownsJid() requires a platform prefix ("tg:", "slack:",
  * "dc:", ...) or, for WhatsApp, an "@g.us" / "@s.whatsapp.net" suffix, so a
- * bare id like "-1003686659419" can never be delivered. It used to be accepted
+ * bare id like "-1001234567890" can never be delivered. It used to be accepted
  * here with an optimistic "queued for delivery" reply and dropped by the
  * orchestrator afterwards — by which point a scheduled task had already told
- * itself it posted. Receipt: The Convent's garbage/fridge rotation on
- * 2026-09-12, whose announcement was lost while the rotation still advanced.
+ * itself it posted. Receipt: on 2026-09-12 a scheduled task on a production
+ * deployment lost its group announcement this way, and still advanced its own
+ * state as if the announcement had gone out.
  *
  * Resolution is deliberately conservative:
  *  - omitted                  → the current chat (unchanged behaviour)
