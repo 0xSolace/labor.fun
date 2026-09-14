@@ -15,8 +15,8 @@
  *
  * DM_JID_SHAPES is an allowlist, so it fails safe: group chats, channels,
  * threads, web sessions, plugin prefixes, malformed ids and any shape added
- * later are rejected until they are listed there. GROUP_JID_SHAPES only picks
- * the wording of a rejection.
+ * later are rejected until they are listed there. DISCORD_CHANNEL_JID and
+ * GROUP_JID_SHAPES only pick the wording of a rejection.
  *
  * A rejection writes no IPC, so no account is created.
  */
@@ -27,21 +27,25 @@ const PARAM = 'target_telegram_jid';
 const DM_EXAMPLE = '"tg:1234567890"';
 const NOTHING_SENT = 'No account was created and nothing was sent.';
 const ACCEPTED_FORMS =
-  `Accepted forms: tg:<user id> (e.g. ${DM_EXAMPLE}), <phone>@s.whatsapp.net, ` +
-  'signal:<+phone or uuid>, slack:<id starting with D, U or W>, ' +
-  'dc-dm:<user id>.';
+  `Accepted forms: tg:<user id> (e.g. ${DM_EXAMPLE}), ` +
+  '<digits, no +>@s.whatsapp.net, signal:<+phone or uuid>, ' +
+  'slack:<id starting with D, U or W>, dc-dm:<user id>.';
 
 /**
  * Direct-message jids, per channel, as each channel builds or delivers them:
- *  - Telegram: a private chat's id is the user's id, positive and at most 52
- *    bits. Groups, supergroups and channels have negative ids or @names.
- *  - WhatsApp: a phone number, optionally with a device suffix, which Baileys
- *    drops when it fans the message out to the user's devices.
+ *  - Telegram: a private chat's id is the user's id. The pattern takes a
+ *    positive id of at most 16 digits; Bot API user ids fit in 52 bits.
+ *    Groups, supergroups and channels have negative ids or @names, so a
+ *    positive id is never one of them.
+ *  - WhatsApp: a phone number's digits with no leading +, optionally with a
+ *    device suffix, which Baileys drops when it fans the message out to the
+ *    user's devices.
  *  - Signal: an E.164 number or the account's uuid.
  *  - Slack: a DM channel (D…) or a user (U…, or W… on Enterprise Grid);
  *    chat.postMessage delivers a user id to the bot's DM with that user.
  *  - Discord: "dc-dm:" and a user id (a snowflake). A "dc:" channel id may be
- *    a guild channel or a DM, and the id alone doesn't say which.
+ *    a server channel or a DM, and the id alone doesn't say which, so it is
+ *    rejected with its own message (see DISCORD_CHANNEL_JID).
  * Teams is left out: the channel tells a personal chat from a group by the
  * inbound activity's conversationType, not by its id, and it can only send to
  * a conversation it has heard from since it started.
@@ -54,13 +58,18 @@ const DM_JID_SHAPES: readonly RegExp[] = [
   /^dc-dm:[1-9]\d{0,19}$/,
 ];
 
+/**
+ * A Discord channel id. The Discord channel keys a DM as "dc:<channel id>"
+ * too, so this can't be called a group: it gets its own rejection.
+ */
+const DISCORD_CHANNEL_JID = /^dc:[1-9]\d{0,19}$/;
+
 /** Group chats, channels and shared threads, by shape. */
 const GROUP_JID_SHAPES: readonly RegExp[] = [
   /^tg:\s*[-@]/, // Telegram group, supergroup or channel
   /@g\.us$/i, // WhatsApp group
   /^signal:group:/,
   /^slack:[CG]/, // Slack channel or private group
-  /^dc:/, // Discord channel or thread
   /^teams:19:/, // Teams group chat or channel
   /^gh:/, // GitHub issue or pull request thread
 ];
@@ -108,6 +117,13 @@ export function resolveKbUserTarget(
   // resolveTargetJid can't fail here (bare ids were handled above), but its
   // error is never passed on: it tells the agent to omit the parameter.
   const jid = resolved.ok ? resolved.jid : target;
+  if (DISCORD_CHANNEL_JID.test(jid)) {
+    return rejected(
+      `${PARAM} "${target}" is a Discord channel id, which can be a server ` +
+        `channel or a DM, and this tool can't tell which. ` +
+        `Pass the new user's Discord DM as "dc-dm:<user id>".`,
+    );
+  }
   if (GROUP_JID_SHAPES.some((re) => re.test(jid))) {
     return rejected(
       `${PARAM} "${target}" looks like a group chat, channel or thread. ` +

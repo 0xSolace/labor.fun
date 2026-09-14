@@ -46,23 +46,31 @@ const GROUP_JIDS = [
   'signal:group:abc',
   'slack:C0123456789',
   'slack:G0123456789',
-  'dc:123456789012345678',
   'teams:19:abc123@thread.v2',
   'gh:owner/repo/1',
+];
+
+/** Discord channel ids: a server channel or a DM, and the id doesn't say which. */
+const DISCORD_CHANNEL_JIDS = [
+  'dc:123456789012345678',
+  'DC:123456789012345678',
+  ' dc:123456789012345678 ',
 ];
 
 /** Prefixed values that are neither a deliverable DM nor group-shaped. */
 const NON_DM_JIDS = [
   'tg:0-1001234567890',
   'tg:12345678901234567890', // 20 digits
-  'tg:12345678901234567', // 17 digits, past 52 bits
+  'tg:12345678901234567', // 17 digits, past the 16-digit limit
   'tg:0',
   'tg:\u22121001234567890', // Unicode minus
   'tg:\u200b1234567890', // zero-width space
   'tg:1234567890\u200b', // trailing zero-width space
   '0@s.whatsapp.net',
+  '+15551234567@s.whatsapp.net', // a leading +
   'signal:u:someone.01',
   'slack:u0123456789',
+  'dc:abc', // not a Discord id
   'dc-dm:abc',
   'teams:a:1AbCdEfGh', // Teams personal chat
   'web:site1:sess1',
@@ -98,6 +106,18 @@ function expectGroupRejection(raw: string, current: string): void {
   expect(error).toContain("the new user's own DM");
   expect(error).toContain('"tg:1234567890"');
   expect(error).toContain(NOTHING_SENT);
+}
+
+function expectDiscordRejection(raw: string, current: string): void {
+  const error = rejection(raw, current);
+  expect(error, `${JSON.stringify(raw)} in ${current}`).toBe(
+    `target_telegram_jid "${raw.trim()}" is a Discord channel id, which can ` +
+      "be a server channel or a DM, and this tool can't tell which. Pass the " +
+      'new user\'s Discord DM as "dc-dm:<user id>". No account was created ' +
+      'and nothing was sent.',
+  );
+  expect(error).toContain('"dc-dm:<user id>"');
+  expect(error.toLowerCase()).not.toContain('group');
 }
 
 function expectNonDmRejection(raw: string, current: string): void {
@@ -169,11 +189,34 @@ describe('resolveKbUserTarget', () => {
       'signal:group:abc',
       'slack:C0123456789',
       'slack:G0123456789',
-      'dc:123456789012345678',
       'teams:19:abc123@thread.v2',
       'gh:owner/repo/1',
     ]) {
       expectGroupRejection(jid, jid);
+    }
+  });
+
+  it('rejects a Discord channel id with its own message, not a group one, whatever the current chat', () => {
+    for (const current of CURRENT_CHATS) {
+      for (const raw of DISCORD_CHANNEL_JIDS) {
+        expectDiscordRejection(raw, current);
+      }
+    }
+  });
+
+  it("gives the current chat's full jid the Discord message when it is a Discord channel", () => {
+    const channel = 'dc:123456789012345678';
+    expectDiscordRejection(channel, channel);
+    expectDiscordRejection(channel, 'dc:876543210987654321');
+  });
+
+  it('still accepts a Discord DM given as dc-dm:<user id>', () => {
+    for (const current of ['dc:123456789012345678', GROUP, DM]) {
+      expectAccepted(
+        'dc-dm:123456789012345678',
+        'dc-dm:123456789012345678',
+        current,
+      );
     }
   });
 
@@ -184,8 +227,13 @@ describe('resolveKbUserTarget', () => {
   });
 
   it('lists the accepted DM forms when it rejects a prefixed target', () => {
-    for (const raw of ['slack:C0123456789', 'dc:123456789012345678', 'x:123']) {
+    for (const raw of [
+      'slack:C0123456789',
+      '+15551234567@s.whatsapp.net',
+      'x:123',
+    ]) {
       const error = rejection(raw);
+      expect(error).toContain('<digits, no +>@s.whatsapp.net');
       expect(error).toContain('slack:<id starting with D, U or W>');
       expect(error).toContain('dc-dm:<user id>');
     }
@@ -230,6 +278,7 @@ describe('resolveKbUserTarget', () => {
         '-1001234567890',
         '1234567890',
         ...GROUP_JIDS,
+        ...DISCORD_CHANNEL_JIDS,
         ...NON_DM_JIDS,
       ]) {
         const r = resolveKbUserTarget(raw, current);

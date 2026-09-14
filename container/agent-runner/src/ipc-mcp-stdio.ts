@@ -1712,7 +1712,7 @@ server.tool(
     target_telegram_jid: z
       .string()
       .describe(
-        'The new user\'s own direct-message JID, where the credentials are sent, e.g. "tg:1234567890". Accepted forms: tg:<user id>, <phone>@s.whatsapp.net, signal:<+phone or uuid>, slack:<id starting with D, U or W>, dc-dm:<user id>. Group chats and other non-DM targets are rejected and no account is created.',
+        'The new user\'s own direct-message JID, where the credentials are sent, e.g. "tg:1234567890". Accepted forms: tg:<user id>, <digits, no +>@s.whatsapp.net, signal:<+phone or uuid>, slack:<id starting with D, U or W>, dc-dm:<user id>. Group chats and other non-DM targets are rejected and no account is created.',
       ),
   },
   async (args) => {
@@ -1738,7 +1738,7 @@ server.tool(
       content: [
         {
           type: 'text' as const,
-          text: `KB user creation queued for ${args.username}; credentials will be DM'd to ${target.jid}. Will be rejected by the orchestrator if the caller is not allowlisted.`,
+          text: `KB user creation queued for ${args.username}. If the orchestrator accepts it, the credentials go to ${target.jid}. It may still reject the request (caller not allowlisted, username taken or invalid) or fail to deliver the credentials, and nothing is reported back here.`,
         },
       ],
     };
